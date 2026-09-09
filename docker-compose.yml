@@ -1,0 +1,24 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: eventhub-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: eventhub_db
+      POSTGRES_USER: eventhub_user
+      POSTGRES_PASSWORD: eventhub_pass
+    ports:
+      # Host port 5433 -> container 5432.
+      # Kept off the default 5432 on purpose so this doesn't clash with a
+      # local Postgres instance already running on your machine.
+      - "5433:5432"
+    volumes:
+      - eventhub_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eventhub_user -d eventhub_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  eventhub_pgdata:
