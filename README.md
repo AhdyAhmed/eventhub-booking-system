@@ -2,7 +2,7 @@
 
 A production-grade event/ticket booking system demonstrating optimistic locking under concurrency, Redis caching, and event-driven order processing in Spring Boot. This is Project 3 of a 3-project backend portfolio (Core REST API → Auth & Authorization → **Production-grade Booking/Order System**).
 
-**Status:** 🚧 Day 2 — domain model & schema. Business logic, endpoints, concurrency handling, caching, and the event-driven pipeline land over the following days (see [Roadmap](#roadmap) below).
+**Status:** 🚧 Day 3 — layered CRUD for Venue & Event. Search/filtering, validation, concurrency handling, caching, and the event-driven pipeline land over the following days (see [Roadmap](#roadmap) below).
 
 ---
 
@@ -37,6 +37,47 @@ No domain entities, business logic, or endpoints beyond health checks exist yet 
 - Real relationships, not a flat schema: `Venue 1—N Event 1—N Seat`, `User 1—N Booking 1—N BookingItem N—1 Seat`
 - A `V2__domain_schema.sql` migration that matches the entities exactly, so `ddl-auto: validate` (see `application.yml`) fails loudly on any mismatch instead of Hibernate silently patching the schema
 - Still no controllers, services, or repositories — those start Day 3. The existing Testcontainers smoke test now also doubles as a schema/entity consistency check, since the context won't start if they disagree.
+
+## What Day 3 adds
+
+Full `Controller → Service → Repository` layering for **Venue** and **Event**, with DTOs at the boundary — no JPA entity is ever serialized directly in a response or bound directly from a request body.
+
+- `VenueRepository`, `EventRepository` — plain `JpaRepository`, no custom queries yet (Day 4)
+- `VenueService`/`VenueServiceImpl`, `EventService`/`EventServiceImpl` — interface + implementation, constructor-injected, `@Transactional` boundaries set correctly (`readOnly = true` on reads)
+- `VenueMapper`, `EventMapper` — small hand-written mapping classes; `EventMapper` maps `Venue` down to a local `VenueSummary` rather than reusing `venue.dto.VenueResponse`, so the `event` package doesn't depend on `venue`'s response shape
+- `VenueController`, `EventController` — standard REST verbs under `/api/v1/venues` and `/api/v1/events`
+- `ResourceNotFoundException` — a lightweight `@ResponseStatus(404)` exception used when an id lookup misses. This is a deliberate stopgap: Day 5 replaces it with a proper `@ControllerAdvice` giving every exception type a consistent JSON error shape
+
+**API surface added:**
+
+| Method | Path                   | Purpose               |
+|--------|------------------------|------------------------|
+| POST   | `/api/v1/venues`        | Create a venue          |
+| GET    | `/api/v1/venues`         | List all venues          |
+| GET    | `/api/v1/venues/{id}`     | Get one venue              |
+| PUT    | `/api/v1/venues/{id}`      | Update a venue               |
+| DELETE | `/api/v1/venues/{id}`       | Delete a venue                |
+| POST   | `/api/v1/events`             | Create an event (by `venueId`) |
+| GET    | `/api/v1/events`               | List all events                  |
+| GET    | `/api/v1/events/{id}`            | Get one event                       |
+| PUT    | `/api/v1/events/{id}`             | Update an event                      |
+| DELETE | `/api/v1/events/{id}`              | Delete an event                       |
+
+No pagination, sorting, or filtering yet (`GET` returns every row) — that's Day 4. No `@Valid`/bean validation on the request DTOs yet — that's Day 5.
+
+**Try it once the app is running:**
+
+```bash
+curl -X POST http://localhost:8080/api/v1/venues \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Cairo Arena","city":"Cairo","address":"Nasr City","capacity":5000}'
+
+curl -X POST http://localhost:8080/api/v1/events \
+  -H "Content-Type: application/json" \
+  -d '{"venueId":1,"name":"Launch Night","description":"Opening event","category":"CONCERT","eventDate":"2026-12-01T19:00:00Z"}'
+
+curl http://localhost:8080/api/v1/events
+```
 
 ## Prerequisites
 
@@ -86,13 +127,32 @@ All datasource settings are overridable via environment variables, with sane loc
 src/main/java/com/ahdyahmed/eventhub/
 ├── EventhubApplication.java   # entry point
 ├── common/
-│   └── BaseEntity.java        # shared id + audit columns, JPA-safe equals/hashCode
+│   ├── BaseEntity.java             # shared id + audit columns, JPA-safe equals/hashCode
+│   └── exception/
+│       └── ResourceNotFoundException.java
 ├── user/
 │   └── User.java
 ├── venue/
-│   └── Venue.java
+│   ├── Venue.java
+│   ├── VenueRepository.java
+│   ├── VenueService.java
+│   ├── VenueServiceImpl.java
+│   ├── VenueController.java
+│   ├── VenueMapper.java
+│   └── dto/
+│       ├── VenueRequest.java
+│       └── VenueResponse.java
 ├── event/
-│   └── Event.java
+│   ├── Event.java
+│   ├── EventRepository.java
+│   ├── EventService.java
+│   ├── EventServiceImpl.java
+│   ├── EventController.java
+│   ├── EventMapper.java
+│   └── dto/
+│       ├── EventRequest.java
+│       ├── EventResponse.java
+│       └── VenueSummary.java
 ├── seat/
 │   ├── Seat.java
 │   └── SeatStatus.java
@@ -119,7 +179,7 @@ Packages are organized **by feature (vertical slice)**, not by technical layer (
 **Week 1 — Foundation & domain**
 - [x] Day 1 — project scaffold, Postgres via Docker Compose, Flyway baseline, health check
 - [x] Day 2 — domain entities (Venue, Event, Seat, User, Booking, BookingItem) + schema migration
-- [ ] Day 3 — layered CRUD (Controller → Service → Repository → DTO) for Venue & Event
+- [x] Day 3 — layered CRUD (Controller → Service → Repository → DTO) for Venue & Event
 - [ ] Day 4 — paginated, sortable, dynamically filterable event search
 - [ ] Day 5 — bean validation, global exception handling, first unit tests
 
@@ -157,3 +217,6 @@ Packages are organized **by feature (vertical slice)**, not by technical layer (
 - **No `@Version` on `Seat` yet, even though optimistic locking is the whole point of this project** — it's added on Day 6 next to the booking flow that actually exercises it, on purpose. Adding it speculatively on Day 2 would mean the commit that's supposed to demonstrate concurrency control shows up with nothing to actually show.
 - **`equals`/`hashCode` based only on a non-null `id`, not Lombok's field-based default** — field-based equality breaks on Hibernate proxies and recurses infinitely across bidirectional associations (`Booking` ↔ `BookingItem`, etc.). `BaseEntity` implements the standard safe pattern once, and every entity inherits it.
 - **`price_at_booking` captured on `BookingItem` instead of read live from `Seat`** — a booking's price shouldn't silently change if the seat's price is edited later. Small detail, but it's the kind of thing that matters in a real order-processing system and costs nothing to get right now.
+- **Manual mappers over MapStruct** — at 2 entities and small DTOs, a mapping library buys nothing but an annotation processor and generated code to explain. Revisit if the DTO surface grows significantly.
+- **`EventMapper` maps to a local `VenueSummary`, not `venue.dto.VenueResponse`** — each feature package depends only on what it needs to expose, not on another feature's full response contract. If `VenueResponse` changes shape for venue-specific reasons, `EventResponse` doesn't move with it.
+- **`ResourceNotFoundException` with `@ResponseStatus` instead of a `@ControllerAdvice` from the start** — gets correct 404s working today without building error-handling infrastructure before there's more than one exception type to handle consistently. Day 5 replaces it.
