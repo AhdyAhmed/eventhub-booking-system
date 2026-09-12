@@ -2,7 +2,7 @@
 
 A production-grade event/ticket booking system demonstrating optimistic locking under concurrency, Redis caching, and event-driven order processing in Spring Boot. This is Project 3 of a 3-project backend portfolio (Core REST API → Auth & Authorization → **Production-grade Booking/Order System**).
 
-**Status:** 🚧 Day 3 — layered CRUD for Venue & Event. Search/filtering, validation, concurrency handling, caching, and the event-driven pipeline land over the following days (see [Roadmap](#roadmap) below).
+**Status:** 🚧 Day 4 — paginated, filterable event search. Validation, exception handling, concurrency handling, caching, and the event-driven pipeline land over the following days (see [Roadmap](#roadmap) below).
 
 ---
 
@@ -42,7 +42,7 @@ No domain entities, business logic, or endpoints beyond health checks exist yet 
 
 Full `Controller → Service → Repository` layering for **Venue** and **Event**, with DTOs at the boundary — no JPA entity is ever serialized directly in a response or bound directly from a request body.
 
-- `VenueRepository`, `EventRepository` — plain `JpaRepository`, no custom queries yet (Day 4)
+- `VenueRepository`, `EventRepository` — plain `JpaRepository` at this point; `EventRepository` gains `JpaSpecificationExecutor` on Day 4 for dynamic filtering
 - `VenueService`/`VenueServiceImpl`, `EventService`/`EventServiceImpl` — interface + implementation, constructor-injected, `@Transactional` boundaries set correctly (`readOnly = true` on reads)
 - `VenueMapper`, `EventMapper` — small hand-written mapping classes; `EventMapper` maps `Venue` down to a local `VenueSummary` rather than reusing `venue.dto.VenueResponse`, so the `event` package doesn't depend on `venue`'s response shape
 - `VenueController`, `EventController` — standard REST verbs under `/api/v1/venues` and `/api/v1/events`
@@ -58,12 +58,12 @@ Full `Controller → Service → Repository` layering for **Venue** and **Event*
 | PUT    | `/api/v1/venues/{id}`      | Update a venue               |
 | DELETE | `/api/v1/venues/{id}`       | Delete a venue                |
 | POST   | `/api/v1/events`             | Create an event (by `venueId`) |
-| GET    | `/api/v1/events`               | List all events                  |
+| GET    | `/api/v1/events`               | Paginated, filterable, sortable event search — see below |
 | GET    | `/api/v1/events/{id}`            | Get one event                       |
 | PUT    | `/api/v1/events/{id}`             | Update an event                      |
 | DELETE | `/api/v1/events/{id}`              | Delete an event                       |
 
-No pagination, sorting, or filtering yet (`GET` returns every row) — that's Day 4. No `@Valid`/bean validation on the request DTOs yet — that's Day 5.
+No `@Valid`/bean validation on the request DTOs yet, and no global exception handler beyond the Day 3 stopgap — that's Day 5.
 
 **Try it once the app is running:**
 
@@ -77,6 +77,31 @@ curl -X POST http://localhost:8080/api/v1/events \
   -d '{"venueId":1,"name":"Launch Night","description":"Opening event","category":"CONCERT","eventDate":"2026-12-01T19:00:00Z"}'
 
 curl http://localhost:8080/api/v1/events
+```
+
+## What Day 4 adds
+
+`GET /api/v1/events` is no longer "return every row" — it's a proper paginated, sortable, dynamically filterable search endpoint, without turning into a wall of `if` statements.
+
+- **Pagination & sorting** — standard Spring Data `Pageable` binding: `?page=0&size=20&sort=eventDate,asc`. Sorting is repeatable (`&sort=category,asc`) and works on nested properties like `venue.city` too, since it's resolved via the JPA Criteria path, not a hand-written query.
+- **Dynamic filtering via `Specification`** — `EventSpecifications` has one small, independently testable specification per filterable field (`venueId`, `city`, `category`, `fromDate`/`toDate`). `EventServiceImpl` chains them with `Specification.where(...).and(...)`, and Spring Data treats a `null` specification as a no-op — so all five filters can be chained unconditionally and only the ones the caller actually supplied end up narrowing the query.
+- **`PageResponse<T>`** — a small wrapper in `common/dto` so Spring Data's `Page<T>` (and its version-coupled, fairly verbose JSON shape) never gets serialized directly in a response. Same principle Day 3 applied to entities, extended to pagination metadata.
+- **Venue listing is untouched** — still a plain `GET /api/v1/venues` with no pagination. Venues are low-cardinality reference data in this domain; Events are the resource that actually needs filtering, so that's where the Day 4 effort goes rather than adding pagination everywhere on principle.
+
+**Try the search endpoint:**
+
+```bash
+# All upcoming events, 20 per page, soonest first (the defaults)
+curl "http://localhost:8080/api/v1/events"
+
+# Page 2, 5 per page
+curl "http://localhost:8080/api/v1/events?page=1&size=5"
+
+# Filter by city + category, sorted by date descending
+curl "http://localhost:8080/api/v1/events?city=Cairo&category=CONCERT&sort=eventDate,desc"
+
+# Date range filter
+curl "http://localhost:8080/api/v1/events?fromDate=2026-01-01T00:00:00Z&toDate=2026-12-31T23:59:59Z"
 ```
 
 ## Prerequisites
@@ -128,6 +153,8 @@ src/main/java/com/ahdyahmed/eventhub/
 ├── EventhubApplication.java   # entry point
 ├── common/
 │   ├── BaseEntity.java             # shared id + audit columns, JPA-safe equals/hashCode
+│   ├── dto/
+│   │   └── PageResponse.java       # framework-agnostic pagination wrapper
 │   └── exception/
 │       └── ResourceNotFoundException.java
 ├── user/
@@ -149,9 +176,11 @@ src/main/java/com/ahdyahmed/eventhub/
 │   ├── EventServiceImpl.java
 │   ├── EventController.java
 │   ├── EventMapper.java
+│   ├── EventSpecifications.java    # one Specification per filterable field
 │   └── dto/
 │       ├── EventRequest.java
 │       ├── EventResponse.java
+│       ├── EventSearchCriteria.java
 │       └── VenueSummary.java
 ├── seat/
 │   ├── Seat.java
@@ -180,7 +209,7 @@ Packages are organized **by feature (vertical slice)**, not by technical layer (
 - [x] Day 1 — project scaffold, Postgres via Docker Compose, Flyway baseline, health check
 - [x] Day 2 — domain entities (Venue, Event, Seat, User, Booking, BookingItem) + schema migration
 - [x] Day 3 — layered CRUD (Controller → Service → Repository → DTO) for Venue & Event
-- [ ] Day 4 — paginated, sortable, dynamically filterable event search
+- [x] Day 4 — paginated, sortable, dynamically filterable event search
 - [ ] Day 5 — bean validation, global exception handling, first unit tests
 
 **Week 2 — Concurrency & caching**
@@ -220,3 +249,5 @@ Packages are organized **by feature (vertical slice)**, not by technical layer (
 - **Manual mappers over MapStruct** — at 2 entities and small DTOs, a mapping library buys nothing but an annotation processor and generated code to explain. Revisit if the DTO surface grows significantly.
 - **`EventMapper` maps to a local `VenueSummary`, not `venue.dto.VenueResponse`** — each feature package depends only on what it needs to expose, not on another feature's full response contract. If `VenueResponse` changes shape for venue-specific reasons, `EventResponse` doesn't move with it.
 - **`ResourceNotFoundException` with `@ResponseStatus` instead of a `@ControllerAdvice` from the start** — gets correct 404s working today without building error-handling infrastructure before there's more than one exception type to handle consistently. Day 5 replaces it.
+- **`Specification` over hand-written `@Query` methods for event search** — the alternative is either one giant native/JPQL query with a dozen optional `AND`s hidden behind string concatenation, or a combinatorial explosion of derived query methods for every filter combination. Specifications compose cleanly and each filter is independently testable.
+- **A dedicated `PageResponse<T>` rather than serializing `Page<T>` directly** — keeps the API's pagination contract stable and readable regardless of which Spring Data version is on the classpath, and matches the "don't leak internals" principle already applied to entities in Day 3.

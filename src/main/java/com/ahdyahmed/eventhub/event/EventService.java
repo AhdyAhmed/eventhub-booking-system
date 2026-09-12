@@ -1,8 +1,10 @@
 package com.ahdyahmed.eventhub.event;
 
+import com.ahdyahmed.eventhub.common.dto.PageResponse;
 import com.ahdyahmed.eventhub.event.dto.EventRequest;
 import com.ahdyahmed.eventhub.event.dto.EventResponse;
-import java.util.List;
+import com.ahdyahmed.eventhub.event.dto.EventSearchCriteria;
+import org.springframework.data.domain.Pageable;
 
 public interface EventService {
 
@@ -10,7 +12,7 @@ public interface EventService {
 
     EventResponse getById(Long id);
 
-    List<EventResponse> getAll();
+    PageResponse<EventResponse> search(EventSearchCriteria criteria, Pageable pageable);
 
     EventResponse update(Long id, EventRequest request);
 

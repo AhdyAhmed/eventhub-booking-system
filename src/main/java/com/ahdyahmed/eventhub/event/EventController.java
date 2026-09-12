@@ -1,10 +1,15 @@
 package com.ahdyahmed.eventhub.event;
 
+import com.ahdyahmed.eventhub.common.dto.PageResponse;
 import com.ahdyahmed.eventhub.event.dto.EventRequest;
 import com.ahdyahmed.eventhub.event.dto.EventResponse;
+import com.ahdyahmed.eventhub.event.dto.EventSearchCriteria;
 import java.net.URI;
-import java.util.List;
+import java.time.Instant;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.web.PageableDefault;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -13,6 +18,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
@@ -33,9 +39,23 @@ public class EventController {
         return eventService.getById(id);
     }
 
+    /**
+     * Paginated, sortable, dynamically filterable event search. Every filter
+     * param is optional — omit all of them to page through everything.
+     * Sortable via the standard {@code ?sort=eventDate,desc} (repeatable)
+     * query param, e.g. {@code ?sort=eventDate,asc&sort=category,asc}.
+     */
     @GetMapping
-    public List<EventResponse> getAll() {
-        return eventService.getAll();
+    public PageResponse<EventResponse> search(
+            @RequestParam(required = false) Long venueId,
+            @RequestParam(required = false) String city,
+            @RequestParam(required = false) String category,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant fromDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant toDate,
+            @PageableDefault(size = 20, sort = "eventDate") Pageable pageable
+    ) {
+        EventSearchCriteria criteria = new EventSearchCriteria(venueId, city, category, fromDate, toDate);
+        return eventService.search(criteria, pageable);
     }
 
     @PutMapping("/{id}")

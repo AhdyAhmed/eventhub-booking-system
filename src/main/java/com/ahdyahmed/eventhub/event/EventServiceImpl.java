@@ -1,12 +1,16 @@
 package com.ahdyahmed.eventhub.event;
 
+import com.ahdyahmed.eventhub.common.dto.PageResponse;
 import com.ahdyahmed.eventhub.common.exception.ResourceNotFoundException;
 import com.ahdyahmed.eventhub.event.dto.EventRequest;
 import com.ahdyahmed.eventhub.event.dto.EventResponse;
+import com.ahdyahmed.eventhub.event.dto.EventSearchCriteria;
 import com.ahdyahmed.eventhub.venue.Venue;
 import com.ahdyahmed.eventhub.venue.VenueRepository;
-import java.util.List;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -34,10 +38,16 @@ public class EventServiceImpl implements EventService {
 
     @Override
     @Transactional(readOnly = true)
-    public List<EventResponse> getAll() {
-        return eventRepository.findAll().stream()
-                .map(eventMapper::toResponse)
-                .toList();
+    public PageResponse<EventResponse> search(EventSearchCriteria criteria, Pageable pageable) {
+        Specification<Event> spec = Specification
+                .where(EventSpecifications.hasVenueId(criteria.venueId()))
+                .and(EventSpecifications.hasCity(criteria.city()))
+                .and(EventSpecifications.hasCategory(criteria.category()))
+                .and(EventSpecifications.eventDateFrom(criteria.fromDate()))
+                .and(EventSpecifications.eventDateTo(criteria.toDate()));
+
+        Page<Event> page = eventRepository.findAll(spec, pageable);
+        return PageResponse.from(page.map(eventMapper::toResponse));
     }
 
     @Override
