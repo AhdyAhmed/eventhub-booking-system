@@ -4,6 +4,7 @@ import com.ahdyahmed.eventhub.common.dto.PageResponse;
 import com.ahdyahmed.eventhub.event.dto.EventRequest;
 import com.ahdyahmed.eventhub.event.dto.EventResponse;
 import com.ahdyahmed.eventhub.event.dto.EventSearchCriteria;
+import jakarta.validation.Valid;
 import java.net.URI;
 import java.time.Instant;
 import lombok.RequiredArgsConstructor;
@@ -29,7 +30,7 @@ public class EventController {
     private final EventService eventService;
 
     @PostMapping
-    public ResponseEntity<EventResponse> create(@RequestBody EventRequest request) {
+    public ResponseEntity<EventResponse> create(@Valid @RequestBody EventRequest request) {
         EventResponse response = eventService.create(request);
         return ResponseEntity.created(URI.create("/api/v1/events/" + response.id())).body(response);
     }
@@ -59,7 +60,7 @@ public class EventController {
     }
 
     @PutMapping("/{id}")
-    public EventResponse update(@PathVariable Long id, @RequestBody EventRequest request) {
+    public EventResponse update(@PathVariable Long id, @Valid @RequestBody EventRequest request) {
         return eventService.update(id, request);
     }
 

@@ -1,0 +1,82 @@
+package com.ahdyahmed.eventhub.common.exception;
+
+import jakarta.servlet.http.HttpServletRequest;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.validation.FieldError;
+import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.RestControllerAdvice;
+
+/**
+ * One place that decides how every exception type in the app becomes an
+ * HTTP response, instead of that decision being scattered across
+ * {@code @ResponseStatus} annotations, ad-hoc try/catch blocks in
+ * controllers, or (worst case) Spring's default whitelabel error page.
+ *
+ * <p>Handlers are ordered roughly by how often they'll actually fire:
+ * validation failures and not-found lookups are everyday client errors;
+ * malformed JSON is rarer; the generic {@code Exception} handler is a safety
+ * net that should, ideally, almost never be hit.</p>
+ */
+@Slf4j
+@RestControllerAdvice
+public class GlobalExceptionHandler {
+
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    public ResponseEntity<ErrorResponse> handleValidation(MethodArgumentNotValidException ex,
+                                                           HttpServletRequest request) {
+        Map<String, String> fieldErrors = new LinkedHashMap<>();
+        for (FieldError fieldError : ex.getBindingResult().getFieldErrors()) {
+            fieldErrors.put(fieldError.getField(), fieldError.getDefaultMessage());
+        }
+
+        ErrorResponse body = ErrorResponse.ofValidation(
+                HttpStatus.BAD_REQUEST.value(),
+                HttpStatus.BAD_REQUEST.getReasonPhrase(),
+                "Validation failed",
+                request.getRequestURI(),
+                fieldErrors
+        );
+        return ResponseEntity.badRequest().body(body);
+    }
+
+    @ExceptionHandler(ResourceNotFoundException.class)
+    public ResponseEntity<ErrorResponse> handleNotFound(ResourceNotFoundException ex, HttpServletRequest request) {
+        return respond(HttpStatus.NOT_FOUND, ex.getMessage(), request);
+    }
+
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<ErrorResponse> handleUnreadableBody(HttpMessageNotReadableException ex,
+                                                               HttpServletRequest request) {
+        return respond(HttpStatus.BAD_REQUEST, "Malformed JSON request body", request);
+    }
+
+    /**
+     * Last resort. Anything that reaches here is, by definition, a bug or an
+     * unhandled failure mode — it gets logged with its stack trace server-side,
+     * but the client only ever sees a generic message. Leaking internal
+     * exception details (SQL, stack traces, class names) in an API response
+     * is an information-disclosure risk, not just an ugly response.
+     */
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<ErrorResponse> handleUnexpected(Exception ex, HttpServletRequest request) {
+        log.error("Unhandled exception on {} {}", request.getMethod(), request.getRequestURI(), ex);
+        return respond(HttpStatus.INTERNAL_SERVER_ERROR, "An unexpected error occurred", request);
+    }
+
+    private ResponseEntity<ErrorResponse> respond(HttpStatus status, String message, HttpServletRequest request) {
+        ErrorResponse body = ErrorResponse.of(
+                status.value(),
+                status.getReasonPhrase(),
+                message,
+                request.getRequestURI()
+        );
+        return ResponseEntity.status(status).body(body);
+    }
+
+}

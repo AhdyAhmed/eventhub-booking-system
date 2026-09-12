@@ -2,7 +2,7 @@
 
 A production-grade event/ticket booking system demonstrating optimistic locking under concurrency, Redis caching, and event-driven order processing in Spring Boot. This is Project 3 of a 3-project backend portfolio (Core REST API → Auth & Authorization → **Production-grade Booking/Order System**).
 
-**Status:** 🚧 Day 4 — paginated, filterable event search. Validation, exception handling, concurrency handling, caching, and the event-driven pipeline land over the following days (see [Roadmap](#roadmap) below).
+**Status:** 🚧 Day 5 — validation & error handling. Concurrency handling, caching, and the event-driven pipeline land over the following days (see [Roadmap](#roadmap) below).
 
 ---
 
@@ -64,6 +64,54 @@ Full `Controller → Service → Repository` layering for **Venue** and **Event*
 | DELETE | `/api/v1/events/{id}`              | Delete an event                       |
 
 No `@Valid`/bean validation on the request DTOs yet, and no global exception handler beyond the Day 3 stopgap — that's Day 5.
+
+## What Day 5 adds
+
+Requests are now actually validated, and every exception in the app funnels through one consistent error shape instead of Spring's default error page or a scatter of `@ResponseStatus` annotations.
+
+- **Bean validation on `VenueRequest` and `EventRequest`** — standard constraints (`@NotBlank`, `@NotNull`, `@Positive`, `@Size`) plus `@Valid` on every `POST`/`PUT` controller method
+- **Two custom validators**, because the interesting validation rules here aren't ones the built-in constraints cover:
+  - `@FutureByHours(hours = 1)` — an event's `eventDate` must be at least N hours out, not merely "in the future." Deliberately generic (lives in `common/validation`) so any future "needs lead time" rule can reuse it.
+  - `@ValidCategory` — restricts `Event.category` to a fixed set (`CONCERT`, `SPORTS`, `THEATER`, `CONFERENCE`, `EXHIBITION`, `OTHER`), case-insensitively. Lives in `event/validation` since it's specific to the Event domain.
+- **`GlobalExceptionHandler`** (`@RestControllerAdvice`) — the actual replacement for Day 3's `@ResponseStatus` stopgap. Handles validation failures, `ResourceNotFoundException`, malformed JSON, and a catch-all for anything unexpected (logged server-side, never exposed to the client — leaking stack traces in an API response is an information-disclosure risk, not just an ugly response).
+- **`ErrorResponse`** — one shape for every error the API returns, with an optional `fieldErrors` map that's only populated for validation failures.
+- **First unit tests**: `VenueServiceImplTest` and `EventServiceImplTest` (JUnit 5 + Mockito — only the repository is mocked, mappers run for real since they have no side effects to fake), plus `EventRequestValidationTest`, which exercises both custom validators directly through a real `jakarta.validation.Validator` with no Spring context needed.
+
+**What a validation failure looks like now:**
+
+```bash
+curl -i -X POST http://localhost:8080/api/v1/events \
+  -H "Content-Type: application/json" \
+  -d '{"venueId":1,"name":"","category":"NOT_REAL","eventDate":"2020-01-01T00:00:00Z"}'
+```
+
+```json
+{
+  "timestamp": "2026-09-13T10:15:00Z",
+  "status": 400,
+  "error": "Bad Request",
+  "message": "Validation failed",
+  "path": "/api/v1/events",
+  "fieldErrors": {
+    "name": "name is required",
+    "category": "must be one of: CONCERT, SPORTS, THEATER, CONFERENCE, EXHIBITION, OTHER",
+    "eventDate": "eventDate must be at least 1 hour from now"
+  }
+}
+```
+
+**A 404 now looks like:**
+
+```json
+{
+  "timestamp": "2026-09-13T10:16:00Z",
+  "status": 404,
+  "error": "Not Found",
+  "message": "Event not found with id 999",
+  "path": "/api/v1/events/999",
+  "fieldErrors": null
+}
+```
 
 **Try it once the app is running:**
 
@@ -132,7 +180,7 @@ curl "http://localhost:8080/api/v1/events?fromDate=2026-01-01T00:00:00Z&toDate=2
 mvn test
 ```
 
-The test suite uses Testcontainers, so Docker must be running — it will spin up (and tear down) its own disposable Postgres container, independent of the one from `docker compose up`.
+Most of the suite (`VenueServiceImplTest`, `EventServiceImplTest`, `EventRequestValidationTest`) is plain JUnit 5 + Mockito and needs nothing beyond the JVM. `EventhubApplicationTests` is the exception — it uses Testcontainers to boot the full Spring context against a real, disposable Postgres, so Docker must be running for the full suite to pass.
 
 ## Configuration
 
@@ -155,8 +203,13 @@ src/main/java/com/ahdyahmed/eventhub/
 │   ├── BaseEntity.java             # shared id + audit columns, JPA-safe equals/hashCode
 │   ├── dto/
 │   │   └── PageResponse.java       # framework-agnostic pagination wrapper
-│   └── exception/
-│       └── ResourceNotFoundException.java
+│   ├── exception/
+│   │   ├── ResourceNotFoundException.java
+│   │   ├── ErrorResponse.java      # one error shape for the whole API
+│   │   └── GlobalExceptionHandler.java
+│   └── validation/
+│       ├── FutureByHours.java      # custom constraint: "at least N hours from now"
+│       └── FutureByHoursValidator.java
 ├── user/
 │   └── User.java
 ├── venue/
@@ -177,6 +230,9 @@ src/main/java/com/ahdyahmed/eventhub/
 │   ├── EventController.java
 │   ├── EventMapper.java
 │   ├── EventSpecifications.java    # one Specification per filterable field
+│   ├── validation/
+│   │   ├── ValidCategory.java      # custom constraint: fixed category allow-list
+│   │   └── ValidCategoryValidator.java
 │   └── dto/
 │       ├── EventRequest.java
 │       ├── EventResponse.java
@@ -198,7 +254,13 @@ src/main/resources/
     └── V2__domain_schema.sql  # users, venues, events, seats, bookings, booking_items
 
 src/test/java/com/ahdyahmed/eventhub/
-└── EventhubApplicationTests.java   # Testcontainers context + schema/entity consistency check
+├── EventhubApplicationTests.java        # Testcontainers context + schema/entity consistency check
+├── venue/
+│   └── VenueServiceImplTest.java
+└── event/
+    ├── EventServiceImplTest.java
+    └── dto/
+        └── EventRequestValidationTest.java   # exercises both custom validators directly
 ```
 
 Packages are organized **by feature (vertical slice)**, not by technical layer (i.e. no top-level `entity/`, `repository/`, `service/`, `controller/` packages holding everything). Each domain concept — `user`, `venue`, `event`, `seat`, `booking` — owns its own entity, and will own its own repository/service/controller/DTOs as those land in the coming days. This scales better than layer-first packaging once a domain has more than a handful of types, and it's the structure the rest of the project follows from here on.
@@ -210,7 +272,7 @@ Packages are organized **by feature (vertical slice)**, not by technical layer (
 - [x] Day 2 — domain entities (Venue, Event, Seat, User, Booking, BookingItem) + schema migration
 - [x] Day 3 — layered CRUD (Controller → Service → Repository → DTO) for Venue & Event
 - [x] Day 4 — paginated, sortable, dynamically filterable event search
-- [ ] Day 5 — bean validation, global exception handling, first unit tests
+- [x] Day 5 — bean validation, global exception handling, first unit tests
 
 **Week 2 — Concurrency & caching**
 - [ ] Day 6 — booking creation flow with `@Version` optimistic locking on seats
@@ -245,9 +307,14 @@ Packages are organized **by feature (vertical slice)**, not by technical layer (
 - **Feature packages, not layer packages** — `user/`, `venue/`, `event/`, `seat/`, `booking/` instead of a flat `entity/` + `repository/` + `service/`. Keeps everything related to one domain concept in one place as the project grows past Day 2's entity-only state.
 - **No `@Version` on `Seat` yet, even though optimistic locking is the whole point of this project** — it's added on Day 6 next to the booking flow that actually exercises it, on purpose. Adding it speculatively on Day 2 would mean the commit that's supposed to demonstrate concurrency control shows up with nothing to actually show.
 - **`equals`/`hashCode` based only on a non-null `id`, not Lombok's field-based default** — field-based equality breaks on Hibernate proxies and recurses infinitely across bidirectional associations (`Booking` ↔ `BookingItem`, etc.). `BaseEntity` implements the standard safe pattern once, and every entity inherits it.
+- **`@SuperBuilder`, not `@Builder`, on every entity** — this was a bug caught by actually running `mvn test` on Day 5: plain `@Builder` only builds fields declared directly on the annotated class, so it silently ignored everything inherited from `BaseEntity` (`id`, `createdAt`, `updatedAt`) — the generated builders had no `.id(...)` method at all. `@SuperBuilder` walks the class hierarchy and needs to be applied consistently on the base class and every subclass, including a protected no-args constructor on `BaseEntity` so subclasses' JPA-required no-arg constructors still have a `super()` to call.
 - **`price_at_booking` captured on `BookingItem` instead of read live from `Seat`** — a booking's price shouldn't silently change if the seat's price is edited later. Small detail, but it's the kind of thing that matters in a real order-processing system and costs nothing to get right now.
 - **Manual mappers over MapStruct** — at 2 entities and small DTOs, a mapping library buys nothing but an annotation processor and generated code to explain. Revisit if the DTO surface grows significantly.
 - **`EventMapper` maps to a local `VenueSummary`, not `venue.dto.VenueResponse`** — each feature package depends only on what it needs to expose, not on another feature's full response contract. If `VenueResponse` changes shape for venue-specific reasons, `EventResponse` doesn't move with it.
 - **`ResourceNotFoundException` with `@ResponseStatus` instead of a `@ControllerAdvice` from the start** — gets correct 404s working today without building error-handling infrastructure before there's more than one exception type to handle consistently. Day 5 replaces it.
 - **`Specification` over hand-written `@Query` methods for event search** — the alternative is either one giant native/JPQL query with a dozen optional `AND`s hidden behind string concatenation, or a combinatorial explosion of derived query methods for every filter combination. Specifications compose cleanly and each filter is independently testable.
 - **A dedicated `PageResponse<T>` rather than serializing `Page<T>` directly** — keeps the API's pagination contract stable and readable regardless of which Spring Data version is on the classpath, and matches the "don't leak internals" principle already applied to entities in Day 3.
+- **Two custom constraints instead of stretching built-ins to fit** — `@Future` doesn't express "needs lead time," and a `@Pattern` regex for category would bury the allowed-values list inside a hard-to-read regex instead of a named, reusable validator with a clear message.
+- **One `ErrorResponse` shape for every exception, including validation failures** — a separate DTO for validation errors would mean clients need two error-parsing code paths instead of one with an optional field.
+- **The catch-all `Exception` handler logs full detail server-side but returns a generic message to the client** — returning stack traces or exception class names in a 500 response is a real information-disclosure risk, not just unpolished output.
+- **Mappers are used for real in service unit tests, not mocked** — `VenueMapper`/`EventMapper` have no dependencies and no side effects; mocking them would mean asserting against a canned `when(...)` response instead of the mapper's actual behavior, which defeats the point of the test.

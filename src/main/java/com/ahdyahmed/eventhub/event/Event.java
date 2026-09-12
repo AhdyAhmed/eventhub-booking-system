@@ -21,6 +21,7 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 import lombok.ToString;
+import lombok.experimental.SuperBuilder;
 
 /**
  * A single bookable happening at a venue (a concert night, a match, a
@@ -33,7 +34,7 @@ import lombok.ToString;
 @Setter
 @NoArgsConstructor
 @AllArgsConstructor
-@Builder
+@SuperBuilder
 @ToString(onlyExplicitlyIncluded = true)
 @EqualsAndHashCode(callSuper = true)
 public class Event extends BaseEntity {

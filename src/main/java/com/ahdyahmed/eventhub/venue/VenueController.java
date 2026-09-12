@@ -2,6 +2,7 @@ package com.ahdyahmed.eventhub.venue;
 
 import com.ahdyahmed.eventhub.venue.dto.VenueRequest;
 import com.ahdyahmed.eventhub.venue.dto.VenueResponse;
+import jakarta.validation.Valid;
 import java.net.URI;
 import java.util.List;
 import lombok.RequiredArgsConstructor;
@@ -23,7 +24,7 @@ public class VenueController {
     private final VenueService venueService;
 
     @PostMapping
-    public ResponseEntity<VenueResponse> create(@RequestBody VenueRequest request) {
+    public ResponseEntity<VenueResponse> create(@Valid @RequestBody VenueRequest request) {
         VenueResponse response = venueService.create(request);
         return ResponseEntity.created(URI.create("/api/v1/venues/" + response.id())).body(response);
     }
@@ -39,7 +40,7 @@ public class VenueController {
     }
 
     @PutMapping("/{id}")
-    public VenueResponse update(@PathVariable Long id, @RequestBody VenueRequest request) {
+    public VenueResponse update(@PathVariable Long id, @Valid @RequestBody VenueRequest request) {
         return venueService.update(id, request);
     }
 

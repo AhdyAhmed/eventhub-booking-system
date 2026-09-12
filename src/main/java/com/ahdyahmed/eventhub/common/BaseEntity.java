@@ -6,13 +6,29 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.MappedSuperclass;
 import java.time.Instant;
+import lombok.AccessLevel;
 import lombok.Getter;
+import lombok.NoArgsConstructor;
 import lombok.Setter;
+import lombok.experimental.SuperBuilder;
 import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.UpdateTimestamp;
 
 /**
  * Shared identity + audit columns for every entity in the domain.
+ *
+ * <p>Uses {@code @SuperBuilder}, not plain {@code @Builder}. Lombok's
+ * {@code @Builder} only builds fields declared directly on the annotated
+ * class — it silently ignores anything inherited, which here would mean
+ * every entity's builder is missing {@code id}, {@code createdAt}, and
+ * {@code updatedAt}. {@code @SuperBuilder} walks the class hierarchy and
+ * needs to be applied consistently on both this class and every subclass.</p>
+ *
+ * <p>The explicit protected no-args constructor matters too: once
+ * {@code @SuperBuilder} generates its own (builder-accepting) constructor,
+ * Java stops providing an implicit no-arg one — and subclasses' own
+ * {@code @NoArgsConstructor} (required by JPA) needs a no-arg {@code super()}
+ * to call.</p>
  *
  * <p>equals/hashCode deliberately do NOT use Lombok's field-based defaults.
  * Using every field (including lazy associations) breaks under Hibernate
@@ -23,6 +39,8 @@ import org.hibernate.annotations.UpdateTimestamp;
  */
 @Getter
 @Setter
+@NoArgsConstructor(access = AccessLevel.PROTECTED)
+@SuperBuilder
 @MappedSuperclass
 public abstract class BaseEntity {
 
