@@ -7,6 +7,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -48,6 +49,34 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(ResourceNotFoundException.class)
     public ResponseEntity<ErrorResponse> handleNotFound(ResourceNotFoundException ex, HttpServletRequest request) {
         return respond(HttpStatus.NOT_FOUND, ex.getMessage(), request);
+    }
+
+    @ExceptionHandler(SeatUnavailableException.class)
+    public ResponseEntity<ErrorResponse> handleSeatUnavailable(SeatUnavailableException ex,
+                                                                HttpServletRequest request) {
+        return respond(HttpStatus.CONFLICT, ex.getMessage(), request);
+    }
+
+    @ExceptionHandler(BookingValidationException.class)
+    public ResponseEntity<ErrorResponse> handleBookingValidation(BookingValidationException ex,
+                                                                  HttpServletRequest request) {
+        return respond(HttpStatus.BAD_REQUEST, ex.getMessage(), request);
+    }
+
+    /**
+     * Defense in depth: {@code BookingServiceImpl} already catches the raw
+     * optimistic-lock failure around each seat update and rethrows it as a
+     * {@link SeatUnavailableException} with seat-specific context. This
+     * handler exists for any future write path that touches a
+     * {@code @Version}-ed entity without doing that translation itself — an
+     * unhandled optimistic-lock failure should still come back as a clean
+     * 409, never a raw 500.
+     */
+    @ExceptionHandler(ObjectOptimisticLockingFailureException.class)
+    public ResponseEntity<ErrorResponse> handleOptimisticLock(ObjectOptimisticLockingFailureException ex,
+                                                               HttpServletRequest request) {
+        log.warn("Unhandled optimistic lock conflict on {} {}", request.getMethod(), request.getRequestURI());
+        return respond(HttpStatus.CONFLICT, "The resource was modified concurrently — please retry", request);
     }
 
     @ExceptionHandler(HttpMessageNotReadableException.class)

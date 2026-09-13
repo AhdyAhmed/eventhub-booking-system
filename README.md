@@ -2,7 +2,7 @@
 
 A production-grade event/ticket booking system demonstrating optimistic locking under concurrency, Redis caching, and event-driven order processing in Spring Boot. This is Project 3 of a 3-project backend portfolio (Core REST API → Auth & Authorization → **Production-grade Booking/Order System**).
 
-**Status:** 🚧 Day 5 — validation & error handling. Concurrency handling, caching, and the event-driven pipeline land over the following days (see [Roadmap](#roadmap) below).
+**Status:** 🚧 Day 6 — booking flow with optimistic locking. Caching, the event-driven pipeline, auth, and production hardening land over the following days (see [Roadmap](#roadmap) below).
 
 ---
 
@@ -62,8 +62,37 @@ Full `Controller → Service → Repository` layering for **Venue** and **Event*
 | GET    | `/api/v1/events/{id}`            | Get one event                       |
 | PUT    | `/api/v1/events/{id}`             | Update an event                      |
 | DELETE | `/api/v1/events/{id}`              | Delete an event                       |
+| POST   | `/api/v1/users`                      | Create a user (stand-in until Day 16's real auth) |
+| GET    | `/api/v1/users/{id}`                   | Get one user                            |
+| POST   | `/api/v1/events/{eventId}/seats`         | Add a seat to an event                    |
+| GET    | `/api/v1/events/{eventId}/seats`           | List an event's seats, optional `?status=` filter |
+| POST   | `/api/v1/bookings`                           | Create a booking — reserves one or more seats |
+| GET    | `/api/v1/bookings/{id}`                        | Get one booking                                |
 
-No `@Valid`/bean validation on the request DTOs yet, and no global exception handler beyond the Day 3 stopgap — that's Day 5.
+## What Day 4 adds
+
+`GET /api/v1/events` is no longer "return every row" — it's a proper paginated, sortable, dynamically filterable search endpoint, without turning into a wall of `if` statements.
+
+- **Pagination & sorting** — standard Spring Data `Pageable` binding: `?page=0&size=20&sort=eventDate,asc`. Sorting is repeatable (`&sort=category,asc`) and works on nested properties like `venue.city` too, since it's resolved via the JPA Criteria path, not a hand-written query.
+- **Dynamic filtering via `Specification`** — `EventSpecifications` has one small, independently testable specification per filterable field (`venueId`, `city`, `category`, `fromDate`/`toDate`). `EventServiceImpl` chains them with `Specification.where(...).and(...)`, and Spring Data treats a `null` specification as a no-op — so all five filters can be chained unconditionally and only the ones the caller actually supplied end up narrowing the query.
+- **`PageResponse<T>`** — a small wrapper in `common/dto` so Spring Data's `Page<T>` (and its version-coupled, fairly verbose JSON shape) never gets serialized directly in a response. Same principle Day 3 applied to entities, extended to pagination metadata.
+- **Venue listing is untouched** — still a plain `GET /api/v1/venues` with no pagination. Venues are low-cardinality reference data in this domain; Events are the resource that actually needs filtering, so that's where the Day 4 effort goes rather than adding pagination everywhere on principle.
+
+**Try the search endpoint:**
+
+```bash
+# All upcoming events, 20 per page, soonest first (the defaults)
+curl "http://localhost:8080/api/v1/events"
+
+# Page 2, 5 per page
+curl "http://localhost:8080/api/v1/events?page=1&size=5"
+
+# Filter by city + category, sorted by date descending
+curl "http://localhost:8080/api/v1/events?city=Cairo&category=CONCERT&sort=eventDate,desc"
+
+# Date range filter
+curl "http://localhost:8080/api/v1/events?fromDate=2026-01-01T00:00:00Z&toDate=2026-12-31T23:59:59Z"
+```
 
 ## What Day 5 adds
 
@@ -113,43 +142,49 @@ curl -i -X POST http://localhost:8080/api/v1/events \
 }
 ```
 
-**Try it once the app is running:**
+## What Day 6 adds
+
+The actual thesis of this project: a booking flow that survives two people trying to grab the same seat at the same time, plus the minimum scaffolding the booking flow needs to have anything to book.
+
+**Prerequisite scaffolding (not a separate roadmap day, bundled in here since the booking flow is the first thing that needs real data in these tables):**
+- Minimal **User** create/get (`UserController`/`UserService`) — no password, no roles, no update/delete. This is a stand-in until Day 16's real auth module owns registration; expect it to be revisited then.
+- Minimal **Seat** create/list-by-event (`SeatController`/`SeatService`), nested under `/api/v1/events/{eventId}/seats`.
+
+**The actual feature:**
+- **`@Version` added to `Seat`** (`V3__seat_optimistic_locking.sql`) — every `UPDATE` Hibernate issues against a seat now includes `AND version = ?`, and bumps it on success. A concurrent update that already changed the row makes the next writer's update match zero rows.
+- **`POST /api/v1/bookings`** — takes a `userId` and a list of `seatIds`, and either reserves every seat and creates the booking, or reserves none of them. Booking status starts at `PENDING`; seats move `AVAILABLE → RESERVED` (not `BOOKED` yet — that transition is Day 14's payment step).
+- **Two-layer concurrency defense** in `BookingServiceImpl.reserve()`:
+  1. A cheap pre-check: if `seat.getStatus() != AVAILABLE`, reject immediately.
+  2. The real guard: each seat update is saved with `saveAndFlush()` immediately (not batched), so a version conflict is caught and attributed to the exact seat that lost the race, not deferred to one big flush at the end where that information is lost.
+  
+  Both paths converge on the same `SeatUnavailableException` (409) — from the client's side, "the seat wasn't available" is one outcome regardless of which layer caught it. **Day 7 is the test that actually fires concurrent requests and proves layer 2 holds.**
+- **All-or-nothing atomicity** — if any seat in a multi-seat booking fails (pre-check or version conflict), the exception propagates out of the `@Transactional` method and Spring rolls back the *entire* transaction, including seats that were already successfully reserved earlier in the same loop. A booking never partially succeeds.
+- **Two new exceptions**: `SeatUnavailableException` (409) and `BookingValidationException` (400, for cross-seat rules like "all seats must belong to the same event" that a per-field bean validation annotation can't express) — both wired into `GlobalExceptionHandler`, along with a defensive fallback handler for any raw `ObjectOptimisticLockingFailureException` that might escape from a future write path that isn't as careful.
+
+**Try the full flow:**
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/venues \
-  -H "Content-Type: application/json" \
+# 1. A venue, an event, a seat, and a user to book with
+curl -X POST http://localhost:8080/api/v1/venues -H "Content-Type: application/json" \
   -d '{"name":"Cairo Arena","city":"Cairo","address":"Nasr City","capacity":5000}'
 
-curl -X POST http://localhost:8080/api/v1/events \
-  -H "Content-Type: application/json" \
+curl -X POST http://localhost:8080/api/v1/events -H "Content-Type: application/json" \
   -d '{"venueId":1,"name":"Launch Night","description":"Opening event","category":"CONCERT","eventDate":"2026-12-01T19:00:00Z"}'
 
-curl http://localhost:8080/api/v1/events
-```
+curl -X POST http://localhost:8080/api/v1/events/1/seats -H "Content-Type: application/json" \
+  -d '{"seatNumber":"A1","section":"Floor","price":50.00}'
 
-## What Day 4 adds
+curl -X POST http://localhost:8080/api/v1/users -H "Content-Type: application/json" \
+  -d '{"fullName":"Ahmed Test","email":"ahmed@example.com"}'
 
-`GET /api/v1/events` is no longer "return every row" — it's a proper paginated, sortable, dynamically filterable search endpoint, without turning into a wall of `if` statements.
+# 2. Book it
+curl -X POST http://localhost:8080/api/v1/bookings -H "Content-Type: application/json" \
+  -d '{"userId":1,"seatIds":[1]}'
 
-- **Pagination & sorting** — standard Spring Data `Pageable` binding: `?page=0&size=20&sort=eventDate,asc`. Sorting is repeatable (`&sort=category,asc`) and works on nested properties like `venue.city` too, since it's resolved via the JPA Criteria path, not a hand-written query.
-- **Dynamic filtering via `Specification`** — `EventSpecifications` has one small, independently testable specification per filterable field (`venueId`, `city`, `category`, `fromDate`/`toDate`). `EventServiceImpl` chains them with `Specification.where(...).and(...)`, and Spring Data treats a `null` specification as a no-op — so all five filters can be chained unconditionally and only the ones the caller actually supplied end up narrowing the query.
-- **`PageResponse<T>`** — a small wrapper in `common/dto` so Spring Data's `Page<T>` (and its version-coupled, fairly verbose JSON shape) never gets serialized directly in a response. Same principle Day 3 applied to entities, extended to pagination metadata.
-- **Venue listing is untouched** — still a plain `GET /api/v1/venues` with no pagination. Venues are low-cardinality reference data in this domain; Events are the resource that actually needs filtering, so that's where the Day 4 effort goes rather than adding pagination everywhere on principle.
-
-**Try the search endpoint:**
-
-```bash
-# All upcoming events, 20 per page, soonest first (the defaults)
-curl "http://localhost:8080/api/v1/events"
-
-# Page 2, 5 per page
-curl "http://localhost:8080/api/v1/events?page=1&size=5"
-
-# Filter by city + category, sorted by date descending
-curl "http://localhost:8080/api/v1/events?city=Cairo&category=CONCERT&sort=eventDate,desc"
-
-# Date range filter
-curl "http://localhost:8080/api/v1/events?fromDate=2026-01-01T00:00:00Z&toDate=2026-12-31T23:59:59Z"
+# 3. Try to book the same seat again — this is what a 409 looks like today
+#    (Day 7 proves this same outcome holds even when both requests race)
+curl -i -X POST http://localhost:8080/api/v1/bookings -H "Content-Type: application/json" \
+  -d '{"userId":1,"seatIds":[1]}'
 ```
 
 ## Prerequisites
@@ -205,13 +240,23 @@ src/main/java/com/ahdyahmed/eventhub/
 │   │   └── PageResponse.java       # framework-agnostic pagination wrapper
 │   ├── exception/
 │   │   ├── ResourceNotFoundException.java
+│   │   ├── SeatUnavailableException.java   # 409 — business-state or optimistic-lock conflict
+│   │   ├── BookingValidationException.java # 400 — cross-field booking rules
 │   │   ├── ErrorResponse.java      # one error shape for the whole API
 │   │   └── GlobalExceptionHandler.java
 │   └── validation/
 │       ├── FutureByHours.java      # custom constraint: "at least N hours from now"
 │       └── FutureByHoursValidator.java
 ├── user/
-│   └── User.java
+│   ├── User.java
+│   ├── UserRepository.java
+│   ├── UserService.java
+│   ├── UserServiceImpl.java
+│   ├── UserController.java
+│   ├── UserMapper.java
+│   └── dto/
+│       ├── UserRequest.java
+│       └── UserResponse.java
 ├── venue/
 │   ├── Venue.java
 │   ├── VenueRepository.java
@@ -239,19 +284,37 @@ src/main/java/com/ahdyahmed/eventhub/
 │       ├── EventSearchCriteria.java
 │       └── VenueSummary.java
 ├── seat/
-│   ├── Seat.java
-│   └── SeatStatus.java
+│   ├── Seat.java                   # now carries @Version
+│   ├── SeatStatus.java
+│   ├── SeatRepository.java
+│   ├── SeatService.java
+│   ├── SeatServiceImpl.java
+│   ├── SeatController.java
+│   ├── SeatMapper.java
+│   └── dto/
+│       ├── SeatRequest.java
+│       └── SeatResponse.java
 ├── booking/
 │   ├── Booking.java
 │   ├── BookingItem.java
-│   └── BookingStatus.java
+│   ├── BookingStatus.java
+│   ├── BookingRepository.java
+│   ├── BookingService.java
+│   ├── BookingServiceImpl.java     # the optimistic-locking reservation logic
+│   ├── BookingController.java
+│   ├── BookingMapper.java
+│   └── dto/
+│       ├── BookingRequest.java
+│       ├── BookingResponse.java
+│       └── BookingItemResponse.java
 └── config/                    # cross-cutting configuration (empty for now)
 
 src/main/resources/
 ├── application.yml
 └── db/migration/
     ├── V1__baseline.sql
-    └── V2__domain_schema.sql  # users, venues, events, seats, bookings, booking_items
+    ├── V2__domain_schema.sql             # users, venues, events, seats, bookings, booking_items
+    └── V3__seat_optimistic_locking.sql   # adds seats.version
 
 src/test/java/com/ahdyahmed/eventhub/
 ├── EventhubApplicationTests.java        # Testcontainers context + schema/entity consistency check
@@ -263,7 +326,7 @@ src/test/java/com/ahdyahmed/eventhub/
         └── EventRequestValidationTest.java   # exercises both custom validators directly
 ```
 
-Packages are organized **by feature (vertical slice)**, not by technical layer (i.e. no top-level `entity/`, `repository/`, `service/`, `controller/` packages holding everything). Each domain concept — `user`, `venue`, `event`, `seat`, `booking` — owns its own entity, and will own its own repository/service/controller/DTOs as those land in the coming days. This scales better than layer-first packaging once a domain has more than a handful of types, and it's the structure the rest of the project follows from here on.
+Packages are organized **by feature (vertical slice)**, not by technical layer (i.e. no top-level `entity/`, `repository/`, `service/`, `controller/` packages holding everything). Each domain concept — `user`, `venue`, `event`, `seat`, `booking` — owns its own entity, repository, service, controller, and DTOs. This scales better than layer-first packaging once a domain has more than a handful of types.
 
 ## Roadmap
 
@@ -275,7 +338,7 @@ Packages are organized **by feature (vertical slice)**, not by technical layer (
 - [x] Day 5 — bean validation, global exception handling, first unit tests
 
 **Week 2 — Concurrency & caching**
-- [ ] Day 6 — booking creation flow with `@Version` optimistic locking on seats
+- [x] Day 6 — booking creation flow with `@Version` optimistic locking on seats
 - [ ] Day 7 — concurrency test proving the race condition is handled correctly
 - [ ] Day 8 — Redis cache-aside on read-heavy event/seat endpoints
 - [ ] Day 9 — cache invalidation on booking/seat state change
@@ -318,3 +381,7 @@ Packages are organized **by feature (vertical slice)**, not by technical layer (
 - **One `ErrorResponse` shape for every exception, including validation failures** — a separate DTO for validation errors would mean clients need two error-parsing code paths instead of one with an optional field.
 - **The catch-all `Exception` handler logs full detail server-side but returns a generic message to the client** — returning stack traces or exception class names in a 500 response is a real information-disclosure risk, not just unpolished output.
 - **Mappers are used for real in service unit tests, not mocked** — `VenueMapper`/`EventMapper` have no dependencies and no side effects; mocking them would mean asserting against a canned `when(...)` response instead of the mapper's actual behavior, which defeats the point of the test.
+- **`userId`/seat creation are plain, unauthenticated endpoints for now** — there's no security layer until Day 16. Booking takes a client-supplied `userId` rather than reading a security context that doesn't exist yet. This is a known, temporary gap, not an oversight — flagged in the code and here so it doesn't get mistaken for the final design.
+- **Seats move to `RESERVED`, not `BOOKED`, on booking creation** — `BOOKED` is reserved for after the (currently nonexistent) payment step confirms the booking on Day 14. Modeling that intermediate state now, even before payment exists, keeps the seat lifecycle honest instead of pretending a booking is final before money has changed hands.
+- **`saveAndFlush()` per seat instead of one flush at the end of the loop** — an optimistic-lock failure needs to be attributable to a specific seat. Batching every seat update into a single flush at the end would still catch the conflict correctly, but the exception wouldn't clearly indicate *which* seat lost the race in a multi-seat booking.
+- **Business-state conflict and optimistic-lock conflict both map to the same `SeatUnavailableException`** — a client asking "can I book seat 5" doesn't need to know or care whether the answer came from a status check or a version mismatch. Both mean the same thing: pick a different seat.

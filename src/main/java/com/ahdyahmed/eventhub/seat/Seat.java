@@ -11,6 +11,7 @@ import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
 import jakarta.persistence.UniqueConstraint;
+import jakarta.persistence.Version;
 import java.math.BigDecimal;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -24,11 +25,15 @@ import lombok.experimental.SuperBuilder;
 /**
  * A single seat's inventory row for one event.
  *
- * <p>NOTE: this deliberately does NOT have a {@code @Version} column yet.
- * Optimistic locking is added on Day 6 alongside the booking creation flow
- * that actually needs it — see the Roadmap in README.md. Adding it here
- * ahead of time would mean the commit that introduces concurrency handling
- * has nothing to show for it.</p>
+ * <p>Carries a {@code @Version} column (added Day 6, see {@code
+ * V3__seat_optimistic_locking.sql}) so two concurrent booking attempts on the
+ * same seat can't both succeed. Hibernate includes {@code version} in the
+ * {@code WHERE} clause of every {@code UPDATE} against this row; if a second
+ * transaction already bumped it, the update matches zero rows and Hibernate
+ * raises an optimistic lock failure instead of silently overwriting someone
+ * else's reservation. {@code BookingServiceImpl} catches that failure and
+ * turns it into a {@code SeatUnavailableException} (409) — see Day 7 for the
+ * test that actually proves this under real concurrency.</p>
  */
 @Entity
 @Table(
@@ -64,5 +69,9 @@ public class Seat extends BaseEntity {
     @Column(nullable = false, length = 20)
     @Builder.Default
     private SeatStatus status = SeatStatus.AVAILABLE;
+
+    @Version
+    @Column(nullable = false)
+    private Long version;
 
 }
