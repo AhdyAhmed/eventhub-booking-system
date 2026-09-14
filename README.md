@@ -2,7 +2,7 @@
 
 A production-grade event/ticket booking system demonstrating optimistic locking under concurrency, Redis caching, and event-driven order processing in Spring Boot. This is Project 3 of a 3-project backend portfolio (Core REST API → Auth & Authorization → **Production-grade Booking/Order System**).
 
-**Status:** 🚧 Day 6 — booking flow with optimistic locking. Caching, the event-driven pipeline, auth, and production hardening land over the following days (see [Roadmap](#roadmap) below).
+**Status:** 🚧 Day 7 — concurrency proven under load. Caching, the event-driven pipeline, auth, and production hardening land over the following days (see [Roadmap](#roadmap) below).
 
 ---
 
@@ -20,172 +20,6 @@ A production-grade event/ticket booking system demonstrating optimistic locking 
 | Build                     | Maven                                       |
 | Containerization           | Docker / Docker Compose                     |
 | CI                          | GitHub Actions (from Day 19)                |
-
-## What Day 1 sets up
-
-- Spring Boot application skeleton with a clean package structure
-- PostgreSQL running via Docker Compose **on host port `5433`** (not the Postgres default `5432`), so it won't collide with a local Postgres instance already running on your machine
-- Flyway wired in with a baseline migration, proving the app → Flyway → Postgres pipeline end to end before any domain modeling starts
-- Actuator health check exposed at `/actuator/health`
-- A Testcontainers-backed smoke test that boots the full Spring context against a real Postgres container
-
-No domain entities, business logic, or endpoints beyond health checks exist yet — that's intentional. See the Roadmap for what lands each day.
-
-## What Day 2 adds
-
-- Six JPA entities modeling the actual booking domain: `User`, `Venue`, `Event`, `Seat`, `Booking`, `BookingItem`
-- Real relationships, not a flat schema: `Venue 1—N Event 1—N Seat`, `User 1—N Booking 1—N BookingItem N—1 Seat`
-- A `V2__domain_schema.sql` migration that matches the entities exactly, so `ddl-auto: validate` (see `application.yml`) fails loudly on any mismatch instead of Hibernate silently patching the schema
-- Still no controllers, services, or repositories — those start Day 3. The existing Testcontainers smoke test now also doubles as a schema/entity consistency check, since the context won't start if they disagree.
-
-## What Day 3 adds
-
-Full `Controller → Service → Repository` layering for **Venue** and **Event**, with DTOs at the boundary — no JPA entity is ever serialized directly in a response or bound directly from a request body.
-
-- `VenueRepository`, `EventRepository` — plain `JpaRepository` at this point; `EventRepository` gains `JpaSpecificationExecutor` on Day 4 for dynamic filtering
-- `VenueService`/`VenueServiceImpl`, `EventService`/`EventServiceImpl` — interface + implementation, constructor-injected, `@Transactional` boundaries set correctly (`readOnly = true` on reads)
-- `VenueMapper`, `EventMapper` — small hand-written mapping classes; `EventMapper` maps `Venue` down to a local `VenueSummary` rather than reusing `venue.dto.VenueResponse`, so the `event` package doesn't depend on `venue`'s response shape
-- `VenueController`, `EventController` — standard REST verbs under `/api/v1/venues` and `/api/v1/events`
-- `ResourceNotFoundException` — a lightweight `@ResponseStatus(404)` exception used when an id lookup misses. This is a deliberate stopgap: Day 5 replaces it with a proper `@ControllerAdvice` giving every exception type a consistent JSON error shape
-
-**API surface added:**
-
-| Method | Path                   | Purpose               |
-|--------|------------------------|------------------------|
-| POST   | `/api/v1/venues`        | Create a venue          |
-| GET    | `/api/v1/venues`         | List all venues          |
-| GET    | `/api/v1/venues/{id}`     | Get one venue              |
-| PUT    | `/api/v1/venues/{id}`      | Update a venue               |
-| DELETE | `/api/v1/venues/{id}`       | Delete a venue                |
-| POST   | `/api/v1/events`             | Create an event (by `venueId`) |
-| GET    | `/api/v1/events`               | Paginated, filterable, sortable event search — see below |
-| GET    | `/api/v1/events/{id}`            | Get one event                       |
-| PUT    | `/api/v1/events/{id}`             | Update an event                      |
-| DELETE | `/api/v1/events/{id}`              | Delete an event                       |
-| POST   | `/api/v1/users`                      | Create a user (stand-in until Day 16's real auth) |
-| GET    | `/api/v1/users/{id}`                   | Get one user                            |
-| POST   | `/api/v1/events/{eventId}/seats`         | Add a seat to an event                    |
-| GET    | `/api/v1/events/{eventId}/seats`           | List an event's seats, optional `?status=` filter |
-| POST   | `/api/v1/bookings`                           | Create a booking — reserves one or more seats |
-| GET    | `/api/v1/bookings/{id}`                        | Get one booking                                |
-
-## What Day 4 adds
-
-`GET /api/v1/events` is no longer "return every row" — it's a proper paginated, sortable, dynamically filterable search endpoint, without turning into a wall of `if` statements.
-
-- **Pagination & sorting** — standard Spring Data `Pageable` binding: `?page=0&size=20&sort=eventDate,asc`. Sorting is repeatable (`&sort=category,asc`) and works on nested properties like `venue.city` too, since it's resolved via the JPA Criteria path, not a hand-written query.
-- **Dynamic filtering via `Specification`** — `EventSpecifications` has one small, independently testable specification per filterable field (`venueId`, `city`, `category`, `fromDate`/`toDate`). `EventServiceImpl` chains them with `Specification.where(...).and(...)`, and Spring Data treats a `null` specification as a no-op — so all five filters can be chained unconditionally and only the ones the caller actually supplied end up narrowing the query.
-- **`PageResponse<T>`** — a small wrapper in `common/dto` so Spring Data's `Page<T>` (and its version-coupled, fairly verbose JSON shape) never gets serialized directly in a response. Same principle Day 3 applied to entities, extended to pagination metadata.
-- **Venue listing is untouched** — still a plain `GET /api/v1/venues` with no pagination. Venues are low-cardinality reference data in this domain; Events are the resource that actually needs filtering, so that's where the Day 4 effort goes rather than adding pagination everywhere on principle.
-
-**Try the search endpoint:**
-
-```bash
-# All upcoming events, 20 per page, soonest first (the defaults)
-curl "http://localhost:8080/api/v1/events"
-
-# Page 2, 5 per page
-curl "http://localhost:8080/api/v1/events?page=1&size=5"
-
-# Filter by city + category, sorted by date descending
-curl "http://localhost:8080/api/v1/events?city=Cairo&category=CONCERT&sort=eventDate,desc"
-
-# Date range filter
-curl "http://localhost:8080/api/v1/events?fromDate=2026-01-01T00:00:00Z&toDate=2026-12-31T23:59:59Z"
-```
-
-## What Day 5 adds
-
-Requests are now actually validated, and every exception in the app funnels through one consistent error shape instead of Spring's default error page or a scatter of `@ResponseStatus` annotations.
-
-- **Bean validation on `VenueRequest` and `EventRequest`** — standard constraints (`@NotBlank`, `@NotNull`, `@Positive`, `@Size`) plus `@Valid` on every `POST`/`PUT` controller method
-- **Two custom validators**, because the interesting validation rules here aren't ones the built-in constraints cover:
-  - `@FutureByHours(hours = 1)` — an event's `eventDate` must be at least N hours out, not merely "in the future." Deliberately generic (lives in `common/validation`) so any future "needs lead time" rule can reuse it.
-  - `@ValidCategory` — restricts `Event.category` to a fixed set (`CONCERT`, `SPORTS`, `THEATER`, `CONFERENCE`, `EXHIBITION`, `OTHER`), case-insensitively. Lives in `event/validation` since it's specific to the Event domain.
-- **`GlobalExceptionHandler`** (`@RestControllerAdvice`) — the actual replacement for Day 3's `@ResponseStatus` stopgap. Handles validation failures, `ResourceNotFoundException`, malformed JSON, and a catch-all for anything unexpected (logged server-side, never exposed to the client — leaking stack traces in an API response is an information-disclosure risk, not just an ugly response).
-- **`ErrorResponse`** — one shape for every error the API returns, with an optional `fieldErrors` map that's only populated for validation failures.
-- **First unit tests**: `VenueServiceImplTest` and `EventServiceImplTest` (JUnit 5 + Mockito — only the repository is mocked, mappers run for real since they have no side effects to fake), plus `EventRequestValidationTest`, which exercises both custom validators directly through a real `jakarta.validation.Validator` with no Spring context needed.
-
-**What a validation failure looks like now:**
-
-```bash
-curl -i -X POST http://localhost:8080/api/v1/events \
-  -H "Content-Type: application/json" \
-  -d '{"venueId":1,"name":"","category":"NOT_REAL","eventDate":"2020-01-01T00:00:00Z"}'
-```
-
-```json
-{
-  "timestamp": "2026-09-13T10:15:00Z",
-  "status": 400,
-  "error": "Bad Request",
-  "message": "Validation failed",
-  "path": "/api/v1/events",
-  "fieldErrors": {
-    "name": "name is required",
-    "category": "must be one of: CONCERT, SPORTS, THEATER, CONFERENCE, EXHIBITION, OTHER",
-    "eventDate": "eventDate must be at least 1 hour from now"
-  }
-}
-```
-
-**A 404 now looks like:**
-
-```json
-{
-  "timestamp": "2026-09-13T10:16:00Z",
-  "status": 404,
-  "error": "Not Found",
-  "message": "Event not found with id 999",
-  "path": "/api/v1/events/999",
-  "fieldErrors": null
-}
-```
-
-## What Day 6 adds
-
-The actual thesis of this project: a booking flow that survives two people trying to grab the same seat at the same time, plus the minimum scaffolding the booking flow needs to have anything to book.
-
-**Prerequisite scaffolding (not a separate roadmap day, bundled in here since the booking flow is the first thing that needs real data in these tables):**
-- Minimal **User** create/get (`UserController`/`UserService`) — no password, no roles, no update/delete. This is a stand-in until Day 16's real auth module owns registration; expect it to be revisited then.
-- Minimal **Seat** create/list-by-event (`SeatController`/`SeatService`), nested under `/api/v1/events/{eventId}/seats`.
-
-**The actual feature:**
-- **`@Version` added to `Seat`** (`V3__seat_optimistic_locking.sql`) — every `UPDATE` Hibernate issues against a seat now includes `AND version = ?`, and bumps it on success. A concurrent update that already changed the row makes the next writer's update match zero rows.
-- **`POST /api/v1/bookings`** — takes a `userId` and a list of `seatIds`, and either reserves every seat and creates the booking, or reserves none of them. Booking status starts at `PENDING`; seats move `AVAILABLE → RESERVED` (not `BOOKED` yet — that transition is Day 14's payment step).
-- **Two-layer concurrency defense** in `BookingServiceImpl.reserve()`:
-  1. A cheap pre-check: if `seat.getStatus() != AVAILABLE`, reject immediately.
-  2. The real guard: each seat update is saved with `saveAndFlush()` immediately (not batched), so a version conflict is caught and attributed to the exact seat that lost the race, not deferred to one big flush at the end where that information is lost.
-  
-  Both paths converge on the same `SeatUnavailableException` (409) — from the client's side, "the seat wasn't available" is one outcome regardless of which layer caught it. **Day 7 is the test that actually fires concurrent requests and proves layer 2 holds.**
-- **All-or-nothing atomicity** — if any seat in a multi-seat booking fails (pre-check or version conflict), the exception propagates out of the `@Transactional` method and Spring rolls back the *entire* transaction, including seats that were already successfully reserved earlier in the same loop. A booking never partially succeeds.
-- **Two new exceptions**: `SeatUnavailableException` (409) and `BookingValidationException` (400, for cross-seat rules like "all seats must belong to the same event" that a per-field bean validation annotation can't express) — both wired into `GlobalExceptionHandler`, along with a defensive fallback handler for any raw `ObjectOptimisticLockingFailureException` that might escape from a future write path that isn't as careful.
-
-**Try the full flow:**
-
-```bash
-# 1. A venue, an event, a seat, and a user to book with
-curl -X POST http://localhost:8080/api/v1/venues -H "Content-Type: application/json" \
-  -d '{"name":"Cairo Arena","city":"Cairo","address":"Nasr City","capacity":5000}'
-
-curl -X POST http://localhost:8080/api/v1/events -H "Content-Type: application/json" \
-  -d '{"venueId":1,"name":"Launch Night","description":"Opening event","category":"CONCERT","eventDate":"2026-12-01T19:00:00Z"}'
-
-curl -X POST http://localhost:8080/api/v1/events/1/seats -H "Content-Type: application/json" \
-  -d '{"seatNumber":"A1","section":"Floor","price":50.00}'
-
-curl -X POST http://localhost:8080/api/v1/users -H "Content-Type: application/json" \
-  -d '{"fullName":"Ahmed Test","email":"ahmed@example.com"}'
-
-# 2. Book it
-curl -X POST http://localhost:8080/api/v1/bookings -H "Content-Type: application/json" \
-  -d '{"userId":1,"seatIds":[1]}'
-
-# 3. Try to book the same seat again — this is what a 409 looks like today
-#    (Day 7 proves this same outcome holds even when both requests race)
-curl -i -X POST http://localhost:8080/api/v1/bookings -H "Content-Type: application/json" \
-  -d '{"userId":1,"seatIds":[1]}'
-```
 
 ## Prerequisites
 
@@ -215,7 +49,13 @@ curl -i -X POST http://localhost:8080/api/v1/bookings -H "Content-Type: applicat
 mvn test
 ```
 
-Most of the suite (`VenueServiceImplTest`, `EventServiceImplTest`, `EventRequestValidationTest`) is plain JUnit 5 + Mockito and needs nothing beyond the JVM. `EventhubApplicationTests` is the exception — it uses Testcontainers to boot the full Spring context against a real, disposable Postgres, so Docker must be running for the full suite to pass.
+Runs the fast suite: plain JUnit 5 + Mockito unit tests (no Docker needed) plus `EventhubApplicationTests`, which uses Testcontainers to boot the full Spring context against a real, disposable Postgres — so Docker must be running for that one to pass.
+
+```bash
+mvn verify
+```
+
+Also runs `BookingConcurrencyIT` — a slower Testcontainers-backed integration test that fires real concurrent HTTP requests at the app to prove the optimistic-locking behavior described in [What Day 7 adds](#what-day-7-adds). It's deliberately kept out of the fast `mvn test` path via Maven Failsafe (which handles `*IT` classes) rather than Surefire (which handles `*Test`/`*Tests`) — see the `pom.xml` comment on the `maven-failsafe-plugin` block for why.
 
 ## Configuration
 
@@ -229,6 +69,109 @@ All datasource settings are overridable via environment variables, with sane loc
 | `DB_PASSWORD`           | `eventhub_pass`          | Local dev only — never used as-is in a real deployment |
 | `SERVER_PORT`             | `8080`                    |                                            |
 
+## API reference
+
+| Method | Path                               | Purpose                                              |
+|--------|-------------------------------------|-------------------------------------------------------|
+| POST   | `/api/v1/venues`                     | Create a venue                                         |
+| GET    | `/api/v1/venues`                      | List all venues                                         |
+| GET    | `/api/v1/venues/{id}`                  | Get one venue                                            |
+| PUT    | `/api/v1/venues/{id}`                   | Update a venue                                            |
+| DELETE | `/api/v1/venues/{id}`                    | Delete a venue                                             |
+| POST   | `/api/v1/events`                          | Create an event (by `venueId`)                              |
+| GET    | `/api/v1/events`                           | Paginated, filterable, sortable event search — see [Usage examples](#usage-examples) |
+| GET    | `/api/v1/events/{id}`                       | Get one event                                                |
+| PUT    | `/api/v1/events/{id}`                        | Update an event                                               |
+| DELETE | `/api/v1/events/{id}`                         | Delete an event                                                |
+| POST   | `/api/v1/users`                                | Create a user (stand-in until Day 16's real auth)               |
+| GET    | `/api/v1/users/{id}`                            | Get one user                                                     |
+| POST   | `/api/v1/events/{eventId}/seats`                 | Add a seat to an event                                            |
+| GET    | `/api/v1/events/{eventId}/seats`                  | List an event's seats, optional `?status=` filter                 |
+| POST   | `/api/v1/bookings`                                 | Create a booking — reserves one or more seats                      |
+| GET    | `/api/v1/bookings/{id}`                             | Get one booking                                                     |
+
+Every `POST`/`PUT` body is validated (`@Valid`); every error response — validation failure, not-found, conflict, or unexpected — comes back in the one shape `ErrorResponse` defines. See [Usage examples](#usage-examples) for what each looks like.
+
+## Usage examples
+
+**Full happy path — venue → event → seat → user → booking:**
+
+```bash
+curl -X POST http://localhost:8080/api/v1/venues -H "Content-Type: application/json" \
+  -d '{"name":"Cairo Arena","city":"Cairo","address":"Nasr City","capacity":5000}'
+
+curl -X POST http://localhost:8080/api/v1/events -H "Content-Type: application/json" \
+  -d '{"venueId":1,"name":"Launch Night","description":"Opening event","category":"CONCERT","eventDate":"2026-12-01T19:00:00Z"}'
+
+curl -X POST http://localhost:8080/api/v1/events/1/seats -H "Content-Type: application/json" \
+  -d '{"seatNumber":"A1","section":"Floor","price":50.00}'
+
+curl -X POST http://localhost:8080/api/v1/users -H "Content-Type: application/json" \
+  -d '{"fullName":"Ahmed Test","email":"ahmed@example.com"}'
+
+curl -X POST http://localhost:8080/api/v1/bookings -H "Content-Type: application/json" \
+  -d '{"userId":1,"seatIds":[1]}'
+```
+
+**Trying to book the same seat again returns 409, not a 500** (and Day 7's `BookingConcurrencyIT` proves this holds even when the requests genuinely race, not just when they're sequential like this):
+
+```bash
+curl -i -X POST http://localhost:8080/api/v1/bookings -H "Content-Type: application/json" \
+  -d '{"userId":1,"seatIds":[1]}'
+```
+
+**Paginated, filterable, sortable event search:**
+
+```bash
+# Defaults: 20 per page, soonest first
+curl "http://localhost:8080/api/v1/events"
+
+# Page 2, 5 per page
+curl "http://localhost:8080/api/v1/events?page=1&size=5"
+
+# Filter by city + category, sorted by date descending
+curl "http://localhost:8080/api/v1/events?city=Cairo&category=CONCERT&sort=eventDate,desc"
+
+# Date range filter
+curl "http://localhost:8080/api/v1/events?fromDate=2026-01-01T00:00:00Z&toDate=2026-12-31T23:59:59Z"
+```
+
+**A validation failure:**
+
+```bash
+curl -i -X POST http://localhost:8080/api/v1/events \
+  -H "Content-Type: application/json" \
+  -d '{"venueId":1,"name":"","category":"NOT_REAL","eventDate":"2020-01-01T00:00:00Z"}'
+```
+
+```json
+{
+  "timestamp": "2026-09-13T10:15:00Z",
+  "status": 400,
+  "error": "Bad Request",
+  "message": "Validation failed",
+  "path": "/api/v1/events",
+  "fieldErrors": {
+    "name": "name is required",
+    "category": "must be one of: CONCERT, SPORTS, THEATER, CONFERENCE, EXHIBITION, OTHER",
+    "eventDate": "eventDate must be at least 1 hour from now"
+  }
+}
+```
+
+**A not-found:**
+
+```json
+{
+  "timestamp": "2026-09-13T10:16:00Z",
+  "status": 404,
+  "error": "Not Found",
+  "message": "Event not found with id 999",
+  "path": "/api/v1/events/999",
+  "fieldErrors": null
+}
+```
+
 ## Project structure
 
 ```
@@ -240,8 +183,8 @@ src/main/java/com/ahdyahmed/eventhub/
 │   │   └── PageResponse.java       # framework-agnostic pagination wrapper
 │   ├── exception/
 │   │   ├── ResourceNotFoundException.java
-│   │   ├── SeatUnavailableException.java   # 409 — business-state or optimistic-lock conflict
-│   │   ├── BookingValidationException.java # 400 — cross-field booking rules
+│   │   ├── SeatUnavailableException.java   # 409 - business-state or optimistic-lock conflict
+│   │   ├── BookingValidationException.java # 400 - cross-field booking rules
 │   │   ├── ErrorResponse.java      # one error shape for the whole API
 │   │   └── GlobalExceptionHandler.java
 │   └── validation/
@@ -284,7 +227,7 @@ src/main/java/com/ahdyahmed/eventhub/
 │       ├── EventSearchCriteria.java
 │       └── VenueSummary.java
 ├── seat/
-│   ├── Seat.java                   # now carries @Version
+│   ├── Seat.java                   # carries @Version
 │   ├── SeatStatus.java
 │   ├── SeatRepository.java
 │   ├── SeatService.java
@@ -320,13 +263,34 @@ src/test/java/com/ahdyahmed/eventhub/
 ├── EventhubApplicationTests.java        # Testcontainers context + schema/entity consistency check
 ├── venue/
 │   └── VenueServiceImplTest.java
-└── event/
-    ├── EventServiceImplTest.java
-    └── dto/
-        └── EventRequestValidationTest.java   # exercises both custom validators directly
+├── event/
+│   ├── EventServiceImplTest.java
+│   └── dto/
+│       └── EventRequestValidationTest.java   # exercises both custom validators directly
+└── booking/
+    ├── BookingServiceImplTest.java      # unit: happy path + every failure mode, mocked repos
+    └── BookingConcurrencyIT.java        # integration: real concurrent HTTP requests, real Postgres
 ```
 
 Packages are organized **by feature (vertical slice)**, not by technical layer (i.e. no top-level `entity/`, `repository/`, `service/`, `controller/` packages holding everything). Each domain concept — `user`, `venue`, `event`, `seat`, `booking` — owns its own entity, repository, service, controller, and DTOs. This scales better than layer-first packaging once a domain has more than a handful of types.
+
+## What Day 7 adds
+
+Day 6 wrote the optimistic-locking defense; Day 7 is the test that actually proves it holds — up to and including firing real simultaneous HTTP requests at a live app, not asserting against a mocked call.
+
+- **`BookingConcurrencyIT`** — spins up the full app on a random port against a real Testcontainers Postgres, seeds one contested seat, then fires 10 concurrent `POST /api/v1/bookings` requests at it from a 10-thread pool. A `CountDownLatch` pair holds every thread at the starting line until all 10 have reached it, then releases them in the same instant — that's what makes this genuinely concurrent rather than "fast sequential calls that happen not to overlap much."
+- **What it asserts**: exactly 1 of the 10 requests gets a 2xx, the other 9 get `409` (not a 500, not a hang), and the seat's `version` column ends up at `1` — not `10` — meaning exactly one `UPDATE` actually succeeded at the database level. That last check is the one that would catch a subtle bug where the application *looks* correct but the locking isn't actually engaged (e.g. a missing `@Version` mapping, or a repository method that bypasses versioned updates).
+- **`BookingServiceImplTest`** — the general-purpose unit tests `BookingServiceImpl` didn't get on Day 6: happy path, missing user, missing/partial seats, a seat that's already taken (the pre-check path), the optimistic-lock exception being translated correctly (the mocked-`saveAndFlush` path — proves the *translation* logic, not the *locking* itself, which only `BookingConcurrencyIT` can do), and seats spanning two different events.
+- **`maven-failsafe-plugin`** added to `pom.xml` — `BookingConcurrencyIT` needs Docker and takes several seconds, so it's deliberately excluded from the fast `mvn test` path and only runs under `mvn verify`. See [Running the tests](#running-the-tests).
+- **Container lifecycle fix**: the first version of `BookingConcurrencyIT` used the `@Testcontainers`/`@Container` annotation pair (same pattern as `EventhubApplicationTests`), and it failed on a real run with `ExtensionConfigurationException: Container postgres needs to be initialized` — thrown before the container even attempted to start. Switched to explicit `@BeforeAll`/`@AfterAll` calling `.start()`/`.stop()` directly, which removes JUnit's reflective field-scanning step entirely rather than trying to chase down why it failed in this one case but not the other.
+
+**Run it:**
+
+```bash
+mvn verify
+```
+
+If it passes, the log will show 10 requests completed, 1 success, 9 conflicts, and a final seat version of 1 — that combination is the actual proof, not just "no exceptions were thrown."
 
 ## Roadmap
 
@@ -339,7 +303,7 @@ Packages are organized **by feature (vertical slice)**, not by technical layer (
 
 **Week 2 — Concurrency & caching**
 - [x] Day 6 — booking creation flow with `@Version` optimistic locking on seats
-- [ ] Day 7 — concurrency test proving the race condition is handled correctly
+- [x] Day 7 — concurrency test proving the race condition is handled correctly
 - [ ] Day 8 — Redis cache-aside on read-heavy event/seat endpoints
 - [ ] Day 9 — cache invalidation on booking/seat state change
 - [ ] Day 10 — Testcontainers Redis test coverage
@@ -366,22 +330,26 @@ Packages are organized **by feature (vertical slice)**, not by technical layer (
 
 - **Postgres on host port 5433, not 5432** — avoids clashing with a locally running Postgres instance. The app's own default (`DB_PORT=5433`) is kept in sync with `docker-compose.yml` so nothing needs to be edited to run this out of the box.
 - **`ddl-auto: validate`, not Hibernate auto-DDL** — the schema is owned entirely by Flyway migrations from day one. This is a deliberate habit: letting Hibernate generate schema is fine for a toy project, but it's not how you'd run this in a team, and this repo is meant to read as production-adjacent throughout, not just at the end.
-- **Testcontainers over an in-memory database (e.g. H2) for tests** — tests run against the same database engine as production. This matters more here than in most projects because Day 7's whole point is proving optimistic-locking behavior under real concurrency, which an in-memory substitute wouldn't faithfully represent.
-- **Feature packages, not layer packages** — `user/`, `venue/`, `event/`, `seat/`, `booking/` instead of a flat `entity/` + `repository/` + `service/`. Keeps everything related to one domain concept in one place as the project grows past Day 2's entity-only state.
-- **No `@Version` on `Seat` yet, even though optimistic locking is the whole point of this project** — it's added on Day 6 next to the booking flow that actually exercises it, on purpose. Adding it speculatively on Day 2 would mean the commit that's supposed to demonstrate concurrency control shows up with nothing to actually show.
+- **Testcontainers over an in-memory database (e.g. H2) for tests** — tests run against the same database engine as production. This matters more here than in most projects because proving optimistic-locking behavior under real concurrency is the project's central claim, and an in-memory substitute wouldn't faithfully represent it.
+- **Feature packages, not layer packages** — `user/`, `venue/`, `event/`, `seat/`, `booking/` instead of a flat `entity/` + `repository/` + `service/`. Keeps everything related to one domain concept in one place as the project grows.
+- **No `@Version` on `Seat` until Day 6** — added next to the booking flow that actually exercises it, on purpose, so the commit that introduces concurrency control has something to show for it.
 - **`equals`/`hashCode` based only on a non-null `id`, not Lombok's field-based default** — field-based equality breaks on Hibernate proxies and recurses infinitely across bidirectional associations (`Booking` ↔ `BookingItem`, etc.). `BaseEntity` implements the standard safe pattern once, and every entity inherits it.
-- **`@SuperBuilder`, not `@Builder`, on every entity** — this was a bug caught by actually running `mvn test` on Day 5: plain `@Builder` only builds fields declared directly on the annotated class, so it silently ignored everything inherited from `BaseEntity` (`id`, `createdAt`, `updatedAt`) — the generated builders had no `.id(...)` method at all. `@SuperBuilder` walks the class hierarchy and needs to be applied consistently on the base class and every subclass, including a protected no-args constructor on `BaseEntity` so subclasses' JPA-required no-arg constructors still have a `super()` to call.
-- **`price_at_booking` captured on `BookingItem` instead of read live from `Seat`** — a booking's price shouldn't silently change if the seat's price is edited later. Small detail, but it's the kind of thing that matters in a real order-processing system and costs nothing to get right now.
-- **Manual mappers over MapStruct** — at 2 entities and small DTOs, a mapping library buys nothing but an annotation processor and generated code to explain. Revisit if the DTO surface grows significantly.
-- **`EventMapper` maps to a local `VenueSummary`, not `venue.dto.VenueResponse`** — each feature package depends only on what it needs to expose, not on another feature's full response contract. If `VenueResponse` changes shape for venue-specific reasons, `EventResponse` doesn't move with it.
-- **`ResourceNotFoundException` with `@ResponseStatus` instead of a `@ControllerAdvice` from the start** — gets correct 404s working today without building error-handling infrastructure before there's more than one exception type to handle consistently. Day 5 replaces it.
-- **`Specification` over hand-written `@Query` methods for event search** — the alternative is either one giant native/JPQL query with a dozen optional `AND`s hidden behind string concatenation, or a combinatorial explosion of derived query methods for every filter combination. Specifications compose cleanly and each filter is independently testable.
-- **A dedicated `PageResponse<T>` rather than serializing `Page<T>` directly** — keeps the API's pagination contract stable and readable regardless of which Spring Data version is on the classpath, and matches the "don't leak internals" principle already applied to entities in Day 3.
-- **Two custom constraints instead of stretching built-ins to fit** — `@Future` doesn't express "needs lead time," and a `@Pattern` regex for category would bury the allowed-values list inside a hard-to-read regex instead of a named, reusable validator with a clear message.
+- **`@SuperBuilder`, not `@Builder`, on every entity** — a bug caught by actually running `mvn test`: plain `@Builder` only builds fields declared directly on the annotated class, so it silently ignored everything inherited from `BaseEntity` (`id`, `createdAt`, `updatedAt`). `@SuperBuilder` walks the class hierarchy and needs to be applied consistently on the base class and every subclass, including a protected no-args constructor on `BaseEntity` so subclasses' JPA-required no-arg constructors still have a `super()` to call.
+- **`price_at_booking` captured on `BookingItem` instead of read live from `Seat`** — a booking's price shouldn't silently change if the seat's price is edited later.
+- **Manual mappers over MapStruct** — at this DTO surface size, a mapping library buys nothing but an annotation processor and generated code to explain. Revisit if the DTO surface grows significantly.
+- **`EventMapper` maps to a local `VenueSummary`, not `venue.dto.VenueResponse`** — each feature package depends only on what it needs to expose, not on another feature's full response contract.
+- **`Specification` over hand-written `@Query` methods for event search** — the alternative is either one giant query with a dozen optional `AND`s hidden behind string concatenation, or a combinatorial explosion of derived query methods. Specifications compose cleanly and each filter is independently testable.
+- **A dedicated `PageResponse<T>` rather than serializing `Page<T>` directly** — keeps the API's pagination contract stable regardless of which Spring Data version is on the classpath, matching the "don't leak internals" principle applied to entities.
+- **Two custom validators instead of stretching built-ins to fit** — `@Future` doesn't express "needs lead time," and a `@Pattern` regex for category would bury the allowed-values list inside a hard-to-read regex instead of a named, reusable validator with a clear message.
 - **One `ErrorResponse` shape for every exception, including validation failures** — a separate DTO for validation errors would mean clients need two error-parsing code paths instead of one with an optional field.
-- **The catch-all `Exception` handler logs full detail server-side but returns a generic message to the client** — returning stack traces or exception class names in a 500 response is a real information-disclosure risk, not just unpolished output.
-- **Mappers are used for real in service unit tests, not mocked** — `VenueMapper`/`EventMapper` have no dependencies and no side effects; mocking them would mean asserting against a canned `when(...)` response instead of the mapper's actual behavior, which defeats the point of the test.
-- **`userId`/seat creation are plain, unauthenticated endpoints for now** — there's no security layer until Day 16. Booking takes a client-supplied `userId` rather than reading a security context that doesn't exist yet. This is a known, temporary gap, not an oversight — flagged in the code and here so it doesn't get mistaken for the final design.
-- **Seats move to `RESERVED`, not `BOOKED`, on booking creation** — `BOOKED` is reserved for after the (currently nonexistent) payment step confirms the booking on Day 14. Modeling that intermediate state now, even before payment exists, keeps the seat lifecycle honest instead of pretending a booking is final before money has changed hands.
-- **`saveAndFlush()` per seat instead of one flush at the end of the loop** — an optimistic-lock failure needs to be attributable to a specific seat. Batching every seat update into a single flush at the end would still catch the conflict correctly, but the exception wouldn't clearly indicate *which* seat lost the race in a multi-seat booking.
-- **Business-state conflict and optimistic-lock conflict both map to the same `SeatUnavailableException`** — a client asking "can I book seat 5" doesn't need to know or care whether the answer came from a status check or a version mismatch. Both mean the same thing: pick a different seat.
+- **The catch-all `Exception` handler logs full detail server-side but returns a generic message to the client** — returning stack traces or exception class names in a 500 response is an information-disclosure risk, not just unpolished output.
+- **Mappers are used for real in service unit tests, not mocked** — they have no dependencies and no side effects; mocking them would mean asserting against a canned `when(...)` response instead of their actual behavior, defeating the point of the test.
+- **`userId` is passed explicitly in the booking request body, not read from a security context** — there's no auth yet (Day 16). This is a known, temporary gap, flagged in the code so it doesn't get mistaken for the final design.
+- **Seats move to `RESERVED`, not `BOOKED`, on booking creation** — `BOOKED` is reserved for after the (currently nonexistent) payment step confirms the booking on Day 14. Modeling that intermediate state now keeps the seat lifecycle honest instead of pretending a booking is final before money has changed hands.
+- **`saveAndFlush()` per seat instead of one flush at the end of the loop** — an optimistic-lock failure needs to be attributable to a specific seat; batching every update into one flush would still catch the conflict but lose that attribution in a multi-seat booking.
+- **Business-state conflict and optimistic-lock conflict both map to the same `SeatUnavailableException`** — a client asking "can I book seat 5" doesn't need to know whether the answer came from a status check or a version mismatch. Both mean the same thing: pick a different seat.
+- **`TestRestTemplate` over `MockMvc` for the concurrency test** — `MockMvc` dispatches through a single thread by design, which would make "concurrent" requests concurrent in name only. A real embedded server hit by real threads is the only way to let the database's actual row-level locking decide the outcome, which is the entire thing under test.
+- **A `CountDownLatch` pair to synchronize thread start, not just "submit 10 tasks to a pool"** — without an explicit starting line, a thread pool tends to run submitted tasks in close-but-not-simultaneous succession, which could pass even with a broken locking implementation. Holding every thread at a barrier until all are ready is what actually forces the race.
+- **Asserting the seat's final `version` value, not just the HTTP status counts** — checking for "1 success, 9 conflicts" alone wouldn't catch a scenario where the locking silently no-ops; checking that `version` moved from `0` to exactly `1` confirms precisely one `UPDATE` reached the database, which is the real claim being tested.
+- **`maven-failsafe-plugin` added to separate `*IT` from `*Test`** — `BookingConcurrencyIT` needs Docker and takes seconds, not milliseconds. Keeping it out of the default `mvn test` path (Surefire) and requiring `mvn verify` (Failsafe) keeps the everyday test loop fast without hiding the slower test from the project — Day 19's CI pipeline will run `mvn verify` specifically to include it.
+- **Explicit `@BeforeAll`/`@AfterAll` container lifecycle in `BookingConcurrencyIT`, not `@Testcontainers`/`@Container`** — caught by actually running `mvn verify`: the annotation-based approach threw `ExtensionConfigurationException: Container postgres needs to be initialized` before the container even attempted to start, despite the identical pattern working in `EventhubApplicationTests`. Rather than chase the exact extension-ordering cause, calling `.start()`/`.stop()` directly sidesteps JUnit's reflective field-scanning step altogether — fewer moving parts, same result.

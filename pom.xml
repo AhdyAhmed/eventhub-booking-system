@@ -112,6 +112,27 @@
                     </excludes>
                 </configuration>
             </plugin>
+            <!--
+                Surefire (bound to `mvn test`) only picks up *Test/*Tests by
+                its default include pattern - it deliberately never runs
+                *IT classes. Failsafe (bound to `mvn verify`) is the
+                complementary plugin that does, via its own default pattern.
+                This split is intentional, not incidental: BookingConcurrencyIT
+                needs Docker and takes several seconds, so it shouldn't run
+                on every `mvn test` the way the fast unit tests do.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
         </plugins>
     </build>
 
