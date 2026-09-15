@@ -22,6 +22,22 @@ spring:
     locations: classpath:db/migration
     baseline-on-migrate: true
 
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6380}
+
+  cache:
+    type: redis
+    redis:
+      # Baseline TTL for any cache name not given its own entry in
+      # CacheConfig's per-cache map. Real per-cache tuning (event details vs.
+      # search results vs. seat availability each age differently) lands
+      # Day 9 alongside the invalidation-on-booking fix; this is deliberately
+      # a single conservative default for now, not the final word.
+      time-to-live: 2m
+      cache-null-values: false
+
 server:
   port: ${SERVER_PORT:8080}
 

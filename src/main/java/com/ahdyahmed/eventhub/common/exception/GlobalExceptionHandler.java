@@ -4,6 +4,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -83,6 +84,26 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ErrorResponse> handleUnreadableBody(HttpMessageNotReadableException ex,
                                                                HttpServletRequest request) {
         return respond(HttpStatus.BAD_REQUEST, "Malformed JSON request body", request);
+    }
+
+    /**
+     * Catches unique/foreign-key constraint violations that reach Postgres
+     * without being pre-checked in the service layer — e.g. a duplicate
+     * {@code users.email}, or a duplicate {@code (event_id, seat_number)} on
+     * seats (see {@code V2__domain_schema.sql}). Without this handler these
+     * fell through to {@link #handleUnexpected}, which is technically
+     * correct (it is an unhandled exception) but a poor experience: a
+     * predictable "that value's already taken" case doesn't deserve the same
+     * generic 500 as a genuine bug. The database-specific detail is logged
+     * server-side only, same reasoning as the catch-all below.
+     */
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    public ResponseEntity<ErrorResponse> handleDataIntegrityViolation(DataIntegrityViolationException ex,
+                                                                       HttpServletRequest request) {
+        log.warn("Data integrity violation on {} {}: {}", request.getMethod(), request.getRequestURI(),
+                ex.getMostSpecificCause().getMessage());
+        return respond(HttpStatus.CONFLICT,
+                "Request conflicts with an existing record (e.g. a duplicate value on a unique field)", request);
     }
 
     /**

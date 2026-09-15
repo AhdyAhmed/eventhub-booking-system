@@ -20,5 +20,23 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    container_name: eventhub-redis
+    restart: unless-stopped
+    ports:
+      # Host port 6380 -> container 6379, same reasoning as Postgres's 5433:
+      # keeps this off the default port so it doesn't clash with a Redis
+      # instance already running locally.
+      - "6380:6379"
+    volumes:
+      - eventhub_redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
 volumes:
   eventhub_pgdata:
+  eventhub_redisdata:

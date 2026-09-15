@@ -1,5 +1,6 @@
 package com.ahdyahmed.eventhub.common.dto;
 
+import java.util.ArrayList;
 import java.util.List;
 import org.springframework.data.domain.Page;
 
@@ -24,7 +25,15 @@ public record PageResponse<T>(
 
     public static <T> PageResponse<T> from(Page<T> page) {
         return new PageResponse<>(
-                page.getContent(),
+                // Wrapped in a plain ArrayList rather than passed through as
+                // whatever List implementation Page.map() happens to return.
+                // A cache (Day 8's Redis cache-aside on event-search) whose
+                // serializer embeds the runtime class name needs that name to
+                // be something it can actually reconstruct - an immutable or
+                // otherwise non-public List type can silently break that
+                // round trip even though plain (non-cached) JSON responses
+                // look identical either way.
+                new ArrayList<>(page.getContent()),
                 page.getNumber(),
                 page.getSize(),
                 page.getTotalElements(),
