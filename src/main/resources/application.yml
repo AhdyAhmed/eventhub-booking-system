@@ -30,11 +30,10 @@ spring:
   cache:
     type: redis
     redis:
-      # Baseline TTL for any cache name not given its own entry in
-      # CacheConfig's per-cache map. Real per-cache tuning (event details vs.
-      # search results vs. seat availability each age differently) lands
-      # Day 9 alongside the invalidation-on-booking fix; this is deliberately
-      # a single conservative default for now, not the final word.
+      # Fallback only - every cache actually in use (events, event-search,
+      # seat-availability) has its own TTL set explicitly in CacheConfig,
+      # tuned per-cache as of Day 9. This value only applies if a cache name
+      # is ever added without a corresponding entry there.
       time-to-live: 2m
       cache-null-values: false
 

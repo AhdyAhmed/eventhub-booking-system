@@ -30,6 +30,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.cache.Cache;
+import org.springframework.cache.CacheManager;
+import org.springframework.cache.concurrent.ConcurrentMapCacheManager;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 
 /**
@@ -55,11 +58,17 @@ class BookingServiceImplTest {
 
     private final BookingMapper bookingMapper = new BookingMapper();
 
+    // A real cache manager, not a mock: the eviction test needs actual
+    // get/put/evict semantics, and ConcurrentMapCacheManager gives that
+    // without needing Redis or Testcontainers for a plain unit test.
+    private final CacheManager cacheManager = new ConcurrentMapCacheManager("seat-availability");
+
     private BookingServiceImpl bookingService;
 
     @BeforeEach
     void setUp() {
-        bookingService = new BookingServiceImpl(bookingRepository, seatRepository, userRepository, bookingMapper);
+        bookingService = new BookingServiceImpl(bookingRepository, seatRepository, userRepository, bookingMapper,
+                cacheManager);
     }
 
     private User user(long id) {
@@ -108,6 +117,40 @@ class BookingServiceImplTest {
         assertThat(response.items()).hasSize(1);
         assertThat(response.totalAmount()).isEqualByComparingTo("50.00");
         assertThat(seat.getStatus()).isEqualTo(SeatStatus.RESERVED);
+    }
+
+    @Test
+    void create_happyPath_evictsSeatAvailabilityCacheForTheEvent() {
+        Event event = event(10L);
+        Seat seat = seat(100L, event, SeatStatus.AVAILABLE);
+
+        when(userRepository.findById(1L)).thenReturn(Optional.of(user(1L)));
+        when(seatRepository.findAllById(List.of(100L))).thenReturn(List.of(seat));
+        when(seatRepository.saveAndFlush(any(Seat.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(bookingRepository.save(any(Booking.class))).thenAnswer(inv -> {
+            Booking booking = inv.getArgument(0);
+            booking.setId(500L);
+            return booking;
+        });
+
+        // Pre-populate every key this event's seat listing could be cached
+        // under, exactly as SeatServiceImpl.getByEvent's real cache key
+        // (eventId + "-" + status) would have left them.
+        Cache cache = cacheManager.getCache("seat-availability");
+        cache.put("10-null", List.of());
+        cache.put("10-AVAILABLE", List.of());
+        cache.put("10-RESERVED", List.of());
+        cache.put("10-BOOKED", List.of());
+        // A different event's cache entry - eviction must not touch this.
+        cache.put("20-null", List.of());
+
+        bookingService.create(new BookingRequest(1L, List.of(100L)));
+
+        assertThat(cache.get("10-null")).isNull();
+        assertThat(cache.get("10-AVAILABLE")).isNull();
+        assertThat(cache.get("10-RESERVED")).isNull();
+        assertThat(cache.get("10-BOOKED")).isNull();
+        assertThat(cache.get("20-null")).isNotNull();
     }
 
     @Test

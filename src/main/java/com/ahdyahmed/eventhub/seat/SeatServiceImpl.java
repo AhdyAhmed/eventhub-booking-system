@@ -39,11 +39,10 @@ public class SeatServiceImpl implements SeatService {
 
     @Override
     @Transactional(readOnly = true)
-    // NOTE (known Day 8 gap, fixed Day 9): this cache is never evicted when
-    // a booking moves a seat from AVAILABLE to RESERVED - BookingServiceImpl
-    // writes straight to Postgres and has no idea this cache exists. Until
-    // Day 9 wires that invalidation, a seat can still list as AVAILABLE here
-    // for up to the 30s TTL after it's actually been booked.
+    // Freshness after a booking is handled by BookingServiceImpl.evictSeatAvailabilityCache,
+    // not here - that class knows which seats a booking touched and which
+    // event they belong to; this class doesn't. Flagged as an open gap
+    // through Day 8, closed Day 9.
     @Cacheable(cacheNames = "seat-availability", key = "#eventId + '-' + #status")
     public List<SeatResponse> getByEvent(Long eventId, SeatStatus status) {
         List<Seat> seats = (status == null)

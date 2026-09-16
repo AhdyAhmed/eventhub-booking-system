@@ -18,11 +18,10 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.cache.RedisCacheConfiguration;
 import org.springframework.data.redis.serializer.GenericJackson2JsonRedisSerializer;
 import org.springframework.data.redis.serializer.RedisSerializationContext;
-import com.fasterxml.jackson.annotation.JsonTypeInfo;
 
 /**
- * Cache-aside wiring for Day 8. Three cache names back the read-heavy
- * endpoints called out in the roadmap:
+ * Cache-aside wiring, first added Day 8. Three cache names back the
+ * read-heavy endpoints called out in the roadmap:
  *
  * <ul>
  *   <li>{@code events} — a single {@code EventResponse} by id
@@ -37,17 +36,20 @@ import com.fasterxml.jackson.annotation.JsonTypeInfo;
  *       filter combination ({@code GET /api/v1/events/{eventId}/seats}).</li>
  * </ul>
  *
- * <p>Each gets its own TTL rather than sharing the blanket default from
- * {@code application.yml}: seat availability is the most volatile of the
- * three (every booking touches it) so it's given the shortest TTL, while a
- * single event's details change rarely. None of this is a substitute for
- * eviction on write — that's what makes it "cache-aside" rather than
- * "eventually correct in under N minutes" — see {@code EventServiceImpl}'s
- * and {@code SeatServiceImpl}'s {@code @CacheEvict} annotations. The one gap
- * deliberately left open here is booking's effect on {@code
- * seat-availability}: {@code BookingServiceImpl} changes a seat's status but
- * doesn't currently evict this cache, so a just-booked seat can still show as
- * available for up to 30 seconds. That's Day 9's fix, not an oversight.</p>
+ * <p><strong>TTL reasoning (finalized Day 9):</strong> each cache gets its
+ * own TTL rather than sharing the blanket default from {@code
+ * application.yml}. {@code seat-availability} keeps the shortest TTL (30s)
+ * — not because it's the primary defense against staleness anymore
+ * (eviction-on-write is, as of Day 9: see {@code EventServiceImpl}'s and
+ * {@code SeatServiceImpl}'s {@code @CacheEvict} annotations and {@code
+ * BookingServiceImpl.evictSeatAvailabilityCache}) but as a backstop for
+ * whatever eviction doesn't cover — a seat status changed by something
+ * other than this app's own service layer (a direct DB write, an admin
+ * tool, a future consumer that doesn't know this cache exists) still
+ * self-heals within 30 seconds instead of indefinitely. {@code events}
+ * (5m) and {@code event-search} (1m) get longer TTLs because they change
+ * less often and are already fully covered by eviction on every write path
+ * this app has.</p>
  */
 @Configuration
 @EnableCaching

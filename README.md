@@ -268,6 +268,22 @@ mvn test      # fast: unit tests + EventhubApplicationTests (Testcontainers Post
 mvn verify    # adds BookingConcurrencyIT - slower, needs Docker
 ```
 
+**8. Cache invalidation on booking (Day 9)** — a fresh seat, so the cache starts clean:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/events/1/seats -H "Content-Type: application/json" \
+  -d '{"seatNumber":"A2","section":"Floor","price":50.00}'
+
+curl http://localhost:8080/api/v1/events/1/seats                # caches the listing
+docker exec eventhub-redis redis-cli KEYS 'seat-availability*'  # shows the cached key
+
+curl -X POST http://localhost:8080/api/v1/bookings -H "Content-Type: application/json" \
+  -d '{"userId":1,"seatIds":[2]}'                                # books seat A2 (id 2)
+
+docker exec eventhub-redis redis-cli KEYS 'seat-availability*'  # empty - evicted immediately
+curl http://localhost:8080/api/v1/events/1/seats                # A2 shows RESERVED, no 30s wait
+```
+
 ## Project structure
 
 ```
@@ -371,37 +387,29 @@ src/test/java/com/ahdyahmed/eventhub/
 
 Packages are organized **by feature (vertical slice)**, not by technical layer (i.e. no top-level `entity/`, `repository/`, `service/`, `controller/` packages holding everything). Each domain concept — `user`, `venue`, `event`, `seat`, `booking` — owns its own entity, repository, service, controller, and DTOs. This scales better than layer-first packaging once a domain has more than a handful of types.
 
-## What Day 8 adds
+## What Day 9 adds
 
-Redis lands as a cache-aside layer in front of the three reads that are called the most and change the least relative to how often they're read: a single event's details, a page of event search results, and an event's seat listing.
+The gap flagged since Day 8 gets closed: `BookingServiceImpl` now tells `seat-availability` when it's gone stale, instead of leaving that entirely to a 30-second TTL.
 
-- **`docker-compose.yml`** — a `redis:7-alpine` service alongside Postgres, on host port `6380` (same "avoid clashing with a local instance already running" reasoning as Postgres's `5433`).
-- **`CacheConfig`** — `@EnableCaching` plus a `RedisCacheManagerBuilderCustomizer` that gives each of the three cache names (`events`, `event-search`, `seat-availability`) its own TTL and a `GenericJackson2JsonRedisSerializer` for values, instead of one blanket config for everything. Seat availability gets the shortest TTL (30s) since it's the most volatile of the three; a single event's details get the longest (5m) since those change rarely.
-- **`@Cacheable` on `EventServiceImpl.getById`, `EventServiceImpl.search`, and `SeatServiceImpl.getByEvent`** — the three reads from the roadmap. `search`'s cache key comes from Spring's default key generator combining both method arguments; that only works because `EventSearchCriteria` (a record) and Spring Data's `PageRequest` both implement `equals`/`hashCode` correctly, so two calls with identical filters and paging land on the same key.
-- **`@CacheEvict` on every write that has an obvious, single-service target** — `EventServiceImpl.create`/`update`/`delete` evict the `events` cache by key (where there's a specific id) and `event-search` wholesale (`allEntries = true`, since a new or changed event could match an unbounded number of already-cached filter/page combinations — there's no single key to target). `SeatServiceImpl.create` does the same for `seat-availability`.
-- **The one gap left open on purpose**: `BookingServiceImpl` changes a seat's status from `AVAILABLE` to `RESERVED` but has no idea the `seat-availability` cache exists, so it doesn't evict it. A seat can list as available for up to 30 seconds after it's actually been booked. That's flagged in a comment on `SeatServiceImpl.getByEvent` rather than silently left for someone to discover, and it's exactly the problem Day 9 ("cache correctness") exists to fix — sequencing it as its own day instead of quietly closing the gap here keeps that day's commit honest about what it's actually fixing.
-- **Two bugs found running this against a real Redis, not caught by unit tests**: (1) `GenericJackson2JsonRedisSerializer`'s no-arg constructor builds its own `ObjectMapper` that doesn't register `jackson-datatype-jsr310`, so every cached `Instant` field failed with `Java 8 date/time type 'java.time.Instant' not supported by default` — fixed by building the `ObjectMapper` explicitly in `CacheConfig.redisObjectMapper()`. (2) `SeatServiceImpl.getByEvent` built its response list with `Stream.toList()`, whose immutable JDK-internal return type can't be reliably reconstructed by Jackson's polymorphic type id on the way back out of Redis — fixed by collecting into a plain `ArrayList` instead (same guard added to `PageResponse.from`, since `Page.map()`'s content list type isn't something this codebase should depend on either). A `CacheErrorHandler` (see below) had been quietly logging both as warnings instead of failing loudly, which is exactly why they surfaced late.
-- **A third bug, found fixing the first one**: `activateDefaultTyping(..., DefaultTyping.NON_FINAL, ...)` skips writing the `"@class"` type-id property for final classes, on the assumption that the declared type is already unambiguous. Every response DTO here (`EventResponse`, `SeatResponse`, ...) is a `record` — implicitly `final` — so no type id was ever written for them, and `RedisCache` (which always reads values back as plain `Object`) had no way to know what to deserialize them into: `missing type id property '@class'`. Switched to `DefaultTyping.EVERYTHING`, which does cover final classes. If you hit this after pulling this fix, any entries already cached under the old config are still malformed until their TTL expires — `docker exec eventhub-redis redis-cli FLUSHALL` clears them immediately instead of waiting.
-- **`CacheErrorHandler` added via `CachingConfigurer`**: a Redis outage — or a serialization bug like the two above — now degrades to "this request wasn't cached" instead of a `500` on top of a write that already succeeded in Postgres. Trade-off worth naming explicitly: this is also *why* the two bugs above didn't show up as hard failures immediately: they were happening on every request from the start, just silently. Worth knowing about that trade-off going in, not just discovering it after the fact.
+- **`BookingServiceImpl.evictSeatAvailabilityCache`** — after a booking successfully reserves its seats, this evicts the exact `seat-availability` keys that event's seats could be cached under: `eventId-null`, `eventId-AVAILABLE`, `eventId-RESERVED`, `eventId-BOOKED`. `validateSingleEvent` already guarantees every seat in one booking belongs to the same event, so one call covers the whole booking regardless of how many seats it reserved.
+- **A different trade-off than Day 8's `event-search` eviction, on purpose** — `event-search`'s cache key depends on arbitrary filter and paging combinations with no fixed upper bound, so `allEntries = true` was the only sane option there. `seat-availability`'s key space is bounded — one `eventId` combined with `null` or one of `SeatStatus`'s three values, four keys total — so enumerating and evicting exactly those four is both possible and precise here. Worth naming as a deliberate difference, not an inconsistency: the same "evict everything vs. evict exactly this" decision, made two different ways because the two caches' key spaces are genuinely different shapes.
+- **`CacheManager` injected directly into `BookingServiceImpl`, not `@CacheEvict`** — `@CacheEvict`'s SpEL key expressions can only see a method's own parameters, and the seat/event this eviction needs isn't one of `create`'s parameters (it's derived from the seats that got reserved). Reaching for the `CacheManager` API directly is the honest way to express "the key to evict depends on something computed mid-method," rather than contorting an annotation to do something it wasn't built for.
+- **TTL reasoning finalized, not just set** — Day 8 picked `events`/`event-search`/`seat-availability` TTLs of 5m/1m/30s as a starting point with "real tuning lands Day 9" written into the comment. Now that eviction-on-write is the primary defense for every cache this app has, the TTLs are reframed as a backstop, not the mechanism: `seat-availability`'s 30s exists to self-heal a seat changed by something *outside* this app's service layer (a direct DB write, a future consumer), not to be the reason a booking's effect on availability shows up promptly — that's the eviction's job now. See the updated `CacheConfig` class doc.
+- **`create_happyPath_evictsSeatAvailabilityCacheForTheEvent`** — a new unit test using a real `ConcurrentMapCacheManager` (not a mock) so the assertion is genuine cache state, not a `verify()` on a method call: pre-populates all four keys for the booked event plus one key for a different event, books a seat, and asserts the booked event's four keys are gone while the other event's entry is untouched.
 
 **Try it** (with the stack up via `docker compose up -d`):
 
 ```bash
-# Peek at what actually landed in Redis - the fastest way to confirm
-# caching is really working, not just "no errors in the response"
-docker exec eventhub-redis redis-cli KEYS '*'
-docker exec eventhub-redis redis-cli GET 'events::1'
-```
-
-```bash
-# First call hits Postgres; watch the DEBUG-level Hibernate SQL log line
-curl http://localhost:8080/api/v1/events/1
-# Second call within 5 minutes returns from Redis - no SQL log line this time
-curl http://localhost:8080/api/v1/events/1
-
-# Same idea for seat availability, shorter TTL
+# Cache the seat listing, then book it, then confirm the cache actually
+# noticed - no waiting out the 30s TTL
 curl http://localhost:8080/api/v1/events/1/seats
-curl http://localhost:8080/api/v1/events/1/seats
+docker exec eventhub-redis redis-cli KEYS 'seat-availability*'   # shows the cached key
+
+curl -X POST http://localhost:8080/api/v1/bookings -H "Content-Type: application/json" \
+  -d '{"userId":1,"seatIds":[1]}'
+
+docker exec eventhub-redis redis-cli KEYS 'seat-availability*'   # empty - evicted, not waiting on TTL
+curl http://localhost:8080/api/v1/events/1/seats                # RESERVED, immediately
 ```
 
 ## Roadmap
@@ -417,7 +425,7 @@ curl http://localhost:8080/api/v1/events/1/seats
 - [x] Day 6 — booking creation flow with `@Version` optimistic locking on seats
 - [x] Day 7 — concurrency test proving the race condition is handled correctly
 - [x] Day 8 — Redis cache-aside on read-heavy event/seat endpoints
-- [ ] Day 9 — cache invalidation on booking/seat state change
+- [x] Day 9 — cache invalidation on booking/seat state change
 - [ ] Day 10 — Testcontainers Redis test coverage
 
 **Week 3 — Event-driven architecture**
@@ -466,11 +474,14 @@ curl http://localhost:8080/api/v1/events/1/seats
 - **Three separate cache names instead of one shared cache with one TTL** — `events`, `event-search`, and `seat-availability` age at genuinely different rates (seat status changes constantly relative to a venue's address), so giving them one TTL would mean either seat data going stale too slowly or event data being evicted needlessly often.
 - **A `RedisCacheManagerBuilderCustomizer` bean instead of hand-building a `RedisCacheManager`** — this hooks into the `RedisCacheManager` Spring Boot's autoconfiguration already builds from `application.yml` (connection factory, default TTL from `spring.cache.redis.time-to-live`) rather than replacing it outright, so the per-cache overrides are additive instead of a second, competing source of truth for the Redis connection itself.
 - **`GenericJackson2JsonRedisSerializer` for cache values, not the JDK's `SerializationPair.java()`** — Java serialization ties every cached value to the exact class bytecode that wrote it, which breaks the moment a DTO's fields change shape; JSON in Redis is also just readable with `redis-cli GET`, which matters for actually debugging this during development.
-- **`allEntries = true` on `event-search` and `seat-availability` evictions, not a targeted key** — both caches are keyed by a combination the writer doesn't fully control (arbitrary filter/page combinations for search; an eventId + status pair for seats), so there's no single key a write could compute to invalidate precisely. Clearing the whole cache is a coarser hammer, but a wrong-but-cheap invalidation here is much safer than a precise-but-fragile one that silently misses a combination.
-- **The booking-vs-seat-cache gap is left in, not patched early** — `BookingServiceImpl` could `@CacheEvict` seat availability today; it deliberately doesn't yet. Roadmap Day 9 is scoped as "cache correctness" specifically because this class of bug (a write in one service invalidating a cache another service reads) is worth its own day and its own commit rather than getting absorbed into "add caching."
+- **`allEntries = true` on `event-search`, and on `SeatServiceImpl.create`'s `seat-availability` eviction** — `event-search` is keyed by an arbitrary filter/page combination the writer doesn't fully control, so there's no single key to compute precisely. A newly-created seat is a similar case: it could belong to any of the cached `(eventId, status)` listings for that event, so `SeatServiceImpl.create` also clears broadly rather than trying to guess which. Contrast this with `BookingServiceImpl`'s eviction of the same cache (Day 9): there, the key space actually is small and known, so that path evicts precisely instead — see the Day 9 bullet below for why the two paths make different choices for the same cache.
+- **The booking-vs-seat-cache gap was left in on Day 8, closed Day 9, not patched early** — `BookingServiceImpl` could have `@CacheEvict`'d seat availability from Day 8 onward; it deliberately didn't. This class of bug (a write in one service invalidating a cache another service reads) was worth its own day and its own commit rather than getting absorbed into "add caching" — see `BookingServiceImpl.evictSeatAvailabilityCache` and "What Day 9 adds" above for how it closed.
 - **`GenericJackson2JsonRedisSerializer` is built with an explicit `ObjectMapper`, not its own no-arg constructor** — the no-arg constructor's internal mapper doesn't register `jackson-datatype-jsr310`, which silently broke every cached `Instant` field. This only surfaced running against a real Redis, not in any unit test, because nothing in the unit test suite serializes through the cache layer at all — a gap worth naming, not just fixing.
 - **`DefaultTyping.EVERYTHING`, not `NON_FINAL`, for the cache's polymorphic type info** — every response DTO in this app is a `record`, which is implicitly `final`. `NON_FINAL` deliberately skips writing the `"@class"` type id for final classes, reasoning that the declared type is already unambiguous — true at the call site, but `RedisCache` reads everything back as plain `Object`, so the type id is the only thing telling Jackson what to reconstruct. `EVERYTHING` covers final classes too.
 - **`Stream.toList()` avoided for anything that will be cached, `Collectors.toCollection(ArrayList::new)` used instead** — `Stream.toList()`'s immutable, JDK-internal return type can't be reliably reconstructed by Jackson's polymorphic type-id mechanism once it's round-tripped through Redis as raw JSON. `PageResponse.from` wraps its content in `new ArrayList<>(...)` for the same reason, defensively, even though `Page.map()`'s current list type happens to work.
 - **A `CacheErrorHandler` that logs and continues, not one that's silent or one that's strict** — without it, a Redis hiccup fails the request even though the underlying write already succeeded in Postgres, which is a worse failure mode than caching simply not happening. The explicit trade-off, named rather than left implicit: this is exactly why the two bugs above weren't caught immediately — they'd been failing (and logging a warning) on every single cached request from the start.
 - **`maven-failsafe-plugin` added to separate `*IT` from `*Test`** — `BookingConcurrencyIT` needs Docker and takes seconds, not milliseconds. Keeping it out of the default `mvn test` path (Surefire) and requiring `mvn verify` (Failsafe) keeps the everyday test loop fast without hiding the slower test from the project — Day 19's CI pipeline will run `mvn verify` specifically to include it.
 - **Explicit `@BeforeAll`/`@AfterAll` container lifecycle in `BookingConcurrencyIT`, not `@Testcontainers`/`@Container`** — caught by actually running `mvn verify`: the annotation-based approach threw `ExtensionConfigurationException: Container postgres needs to be initialized` before the container even attempted to start, despite the identical pattern working in `EventhubApplicationTests`. Rather than chase the exact extension-ordering cause, calling `.start()`/`.stop()` directly sidesteps JUnit's reflective field-scanning step altogether — fewer moving parts, same result.
+- **`BookingServiceImpl` evicts `seat-availability` with `CacheManager` directly, by enumerating exact keys, rather than `allEntries = true`** — unlike `event-search`'s unbounded key space, `seat-availability`'s is small and fixed: one `eventId` paired with `null` or one of `SeatStatus`'s three values. Enumerating those four keys is cheap and leaves every other event's cached listings alone, which `allEntries = true` wouldn't. The same cache, evicted two different ways by two different writers, for two different, equally deliberate reasons — see `SeatServiceImpl.create`'s eviction above for the other one.
+- **A real `ConcurrentMapCacheManager` in `BookingServiceImplTest`, not a Mockito mock of `CacheManager`** — the thing worth proving is that specific keys actually became unreachable in a cache, which is state, not a method call. `verify(cacheManager).getCache(...)` would prove the code *tried* to evict something; asserting `cache.get(key)` is `null` afterward proves it actually happened, and a negative assertion on an untouched key (a different event's cache entry) proves the eviction is precise, not a lucky wildcard.
+- **TTLs reframed, not re-tuned, once eviction-on-write existed for every cache** — Day 8 set `seat-availability`'s TTL to 30s as the *only* thing standing between a booking and a stale read. Once `BookingServiceImpl` evicts on every booking, that TTL's job changes: it's now a backstop against staleness from writers outside this app's own service layer, not the primary mechanism. The number didn't need to change; what it protects against did, and the comments in `CacheConfig` were rewritten to say so rather than leaving Day 8's now-inaccurate reasoning in place.
