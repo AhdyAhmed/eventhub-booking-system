@@ -55,7 +55,12 @@ Runs the fast suite: plain JUnit 5 + Mockito unit tests (no Docker needed) plus 
 mvn verify
 ```
 
-Also runs `BookingConcurrencyIT` — a slower Testcontainers-backed integration test that fires real concurrent HTTP requests at the app to prove the optimistic-locking behavior described in [What Day 7 adds](#what-day-7-adds). It's deliberately kept out of the fast `mvn test` path via Maven Failsafe (which handles `*IT` classes) rather than Surefire (which handles `*Test`/`*Tests`) — see the `pom.xml` comment on the `maven-failsafe-plugin` block for why.
+Also runs the two slower Testcontainers-backed integration tests, kept out of the fast `mvn test` path via Maven Failsafe (which handles `*IT` classes) rather than Surefire (which handles `*Test`/`*Tests`) — see the `pom.xml` comment on the `maven-failsafe-plugin` block for why:
+
+- **`BookingConcurrencyIT`** — fires real concurrent HTTP requests at the app to prove the optimistic-locking behavior added Day 6/7 actually holds under a real race, not just in a mocked unit test.
+- **`RedisCacheIT`** (Day 10) — a real Postgres *and* a real Redis, both via Testcontainers, proving the cache-aside behavior added Days 8–9: hit/miss (a second call to a `@Cacheable` method doesn't reach the database), and eviction-on-write (an update or a booking is reflected on the very next read, not after a TTL).
+
+Both need Docker running to pass; `mvn verify` takes noticeably longer than `mvn test` as a result — two separate sets of containers spin up and tear down.
 
 ## Configuration
 
@@ -387,30 +392,23 @@ src/test/java/com/ahdyahmed/eventhub/
 
 Packages are organized **by feature (vertical slice)**, not by technical layer (i.e. no top-level `entity/`, `repository/`, `service/`, `controller/` packages holding everything). Each domain concept — `user`, `venue`, `event`, `seat`, `booking` — owns its own entity, repository, service, controller, and DTOs. This scales better than layer-first packaging once a domain has more than a handful of types.
 
-## What Day 9 adds
+## What Day 10 adds
 
-The gap flagged since Day 8 gets closed: `BookingServiceImpl` now tells `seat-availability` when it's gone stale, instead of leaving that entirely to a 30-second TTL.
+Every claim Days 8 and 9 made about caching — hit/miss behavior, eviction on write, freshness after a booking — had only ever been checked by hand, with `curl` and `redis-cli`. That's exactly how the three real Redis bugs on Day 8 got found, but manual checking doesn't stay done: nothing stopped a future change from quietly reintroducing any of them. `RedisCacheIT` is that missing safety net.
 
-- **`BookingServiceImpl.evictSeatAvailabilityCache`** — after a booking successfully reserves its seats, this evicts the exact `seat-availability` keys that event's seats could be cached under: `eventId-null`, `eventId-AVAILABLE`, `eventId-RESERVED`, `eventId-BOOKED`. `validateSingleEvent` already guarantees every seat in one booking belongs to the same event, so one call covers the whole booking regardless of how many seats it reserved.
-- **A different trade-off than Day 8's `event-search` eviction, on purpose** — `event-search`'s cache key depends on arbitrary filter and paging combinations with no fixed upper bound, so `allEntries = true` was the only sane option there. `seat-availability`'s key space is bounded — one `eventId` combined with `null` or one of `SeatStatus`'s three values, four keys total — so enumerating and evicting exactly those four is both possible and precise here. Worth naming as a deliberate difference, not an inconsistency: the same "evict everything vs. evict exactly this" decision, made two different ways because the two caches' key spaces are genuinely different shapes.
-- **`CacheManager` injected directly into `BookingServiceImpl`, not `@CacheEvict`** — `@CacheEvict`'s SpEL key expressions can only see a method's own parameters, and the seat/event this eviction needs isn't one of `create`'s parameters (it's derived from the seats that got reserved). Reaching for the `CacheManager` API directly is the honest way to express "the key to evict depends on something computed mid-method," rather than contorting an annotation to do something it wasn't built for.
-- **TTL reasoning finalized, not just set** — Day 8 picked `events`/`event-search`/`seat-availability` TTLs of 5m/1m/30s as a starting point with "real tuning lands Day 9" written into the comment. Now that eviction-on-write is the primary defense for every cache this app has, the TTLs are reframed as a backstop, not the mechanism: `seat-availability`'s 30s exists to self-heal a seat changed by something *outside* this app's service layer (a direct DB write, a future consumer), not to be the reason a booking's effect on availability shows up promptly — that's the eviction's job now. See the updated `CacheConfig` class doc.
-- **`create_happyPath_evictsSeatAvailabilityCacheForTheEvent`** — a new unit test using a real `ConcurrentMapCacheManager` (not a mock) so the assertion is genuine cache state, not a `verify()` on a method call: pre-populates all four keys for the booked event plus one key for a different event, books a seat, and asserts the booked event's four keys are gone while the other event's entry is untouched.
+- **A real Postgres *and* a real Redis, both via Testcontainers, in one test class** — `RedisCacheIT` follows `BookingConcurrencyIT`'s explicit `@BeforeAll`/`@AfterAll` container lifecycle (established Day 7 specifically because the `@Testcontainers`/`@Container` annotation pair failed unpredictably) and adds a second container: a plain `GenericContainer` for `redis:7-alpine`. No new dependency was needed for that — `GenericContainer` ships in the same `testcontainers` core artifact already pulled in by the Postgres and JUnit Jupiter modules.
+- **Hit/miss proven by counting real repository calls, not by inspecting Redis** — `@SpyBean` wraps the actual `EventRepository`/`SeatRepository` beans, and each hit/miss test calls a cached method twice, then asserts the repository was hit exactly once. That's the claim that actually matters to a caller ("did this reach the database again"), which is a stronger and more direct proof than parsing what `redis-cli KEYS` happens to return.
+- **Invalidation proven by re-reading, not by checking a key is gone** — each eviction test calls the write, then calls the read again and asserts it reflects the write (the renamed event's new name; the booked seat's `RESERVED` status). Confirming a Redis key is absent proves eviction ran; confirming the next read is correct proves eviction actually did its job. `RedisCacheIT`'s booking test is the same scenario the person building this project verified by hand over several `curl`/`redis-cli` round trips a few days ago — now it runs on every `mvn verify`.
+- **`clearInvocations()` and `cache.clear()` in a shared `@BeforeEach`** — `@SpyBean` wraps a singleton bean shared across every test method in the class (one Spring context, reused), so invocation counts and cache contents from one test would otherwise leak into the next and make a `times(1)` assertion mean "once more than the previous test already called it." Both are reset before every test so each one starts from a clean, honest baseline.
+- **No changes to any production class** — this is intentionally a pure test-coverage day. Everything it exercises (`@Cacheable`, `@CacheEvict`, `CacheManager.evict`) was already written on Days 8–9; Day 10 exists to prove it, not to add to it.
 
-**Try it** (with the stack up via `docker compose up -d`):
+**Run it:**
 
 ```bash
-# Cache the seat listing, then book it, then confirm the cache actually
-# noticed - no waiting out the 30s TTL
-curl http://localhost:8080/api/v1/events/1/seats
-docker exec eventhub-redis redis-cli KEYS 'seat-availability*'   # shows the cached key
-
-curl -X POST http://localhost:8080/api/v1/bookings -H "Content-Type: application/json" \
-  -d '{"userId":1,"seatIds":[1]}'
-
-docker exec eventhub-redis redis-cli KEYS 'seat-availability*'   # empty - evicted, not waiting on TTL
-curl http://localhost:8080/api/v1/events/1/seats                # RESERVED, immediately
+mvn verify
 ```
+
+Runs `BookingConcurrencyIT` and `RedisCacheIT` back to back — two separate sets of Testcontainers (Postgres + Redis for the new one), so `mvn verify` takes noticeably longer than it did through Day 9. That's an accepted, deliberate trade-off for the coverage, not an oversight.
 
 ## Roadmap
 
@@ -426,7 +424,7 @@ curl http://localhost:8080/api/v1/events/1/seats                # RESERVED, imme
 - [x] Day 7 — concurrency test proving the race condition is handled correctly
 - [x] Day 8 — Redis cache-aside on read-heavy event/seat endpoints
 - [x] Day 9 — cache invalidation on booking/seat state change
-- [ ] Day 10 — Testcontainers Redis test coverage
+- [x] Day 10 — Testcontainers Redis test coverage
 
 **Week 3 — Event-driven architecture**
 - [ ] Day 11 — RabbitMQ setup + topology
@@ -485,3 +483,6 @@ curl http://localhost:8080/api/v1/events/1/seats                # RESERVED, imme
 - **`BookingServiceImpl` evicts `seat-availability` with `CacheManager` directly, by enumerating exact keys, rather than `allEntries = true`** — unlike `event-search`'s unbounded key space, `seat-availability`'s is small and fixed: one `eventId` paired with `null` or one of `SeatStatus`'s three values. Enumerating those four keys is cheap and leaves every other event's cached listings alone, which `allEntries = true` wouldn't. The same cache, evicted two different ways by two different writers, for two different, equally deliberate reasons — see `SeatServiceImpl.create`'s eviction above for the other one.
 - **A real `ConcurrentMapCacheManager` in `BookingServiceImplTest`, not a Mockito mock of `CacheManager`** — the thing worth proving is that specific keys actually became unreachable in a cache, which is state, not a method call. `verify(cacheManager).getCache(...)` would prove the code *tried* to evict something; asserting `cache.get(key)` is `null` afterward proves it actually happened, and a negative assertion on an untouched key (a different event's cache entry) proves the eviction is precise, not a lucky wildcard.
 - **TTLs reframed, not re-tuned, once eviction-on-write existed for every cache** — Day 8 set `seat-availability`'s TTL to 30s as the *only* thing standing between a booking and a stale read. Once `BookingServiceImpl` evicts on every booking, that TTL's job changes: it's now a backstop against staleness from writers outside this app's own service layer, not the primary mechanism. The number didn't need to change; what it protects against did, and the comments in `CacheConfig` were rewritten to say so rather than leaving Day 8's now-inaccurate reasoning in place.
+- **`RedisCacheIT` proves invalidation by re-reading, not by checking Redis for an absent key** — asserting a key is gone from the cache proves the eviction call ran; it doesn't prove the *next read* is actually correct (a bug in the eviction's key computation could still leave the right cache entry, or drop the wrong one, while an unrelated key happens to also be absent). Calling the read again and asserting the response reflects the write is the stronger, more direct claim, and it's the one a caller of the API actually cares about.
+- **`@SpyBean` on the JPA repositories to prove cache hit/miss, not a mock or a Redis key inspection** — the repository being called a second time is the literal definition of a cache miss; counting real invocations on the real bean proves that directly, without needing to reason about what a particular Redis command's output implies about application behavior.
+- **`RedisCacheIT` adds a second Testcontainers container class rather than reusing `BookingConcurrencyIT`'s Postgres instance** — each `@SpringBootTest` class gets its own Spring context and its own container lifecycle by design in this codebase (see `BookingConcurrencyIT`'s and `EventhubApplicationTests`' own containers); sharing a container across test classes is a legitimate optimization some projects make, but it wasn't worth the added lifecycle-coordination complexity for a portfolio-sized suite where `mvn verify` running a bit longer is a fully acceptable trade-off.
