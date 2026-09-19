@@ -15,7 +15,7 @@ A production-grade event/ticket booking system demonstrating optimistic locking 
 | Database              | PostgreSQL 16                              |
 | Migrations             | Flyway                                     |
 | Caching                | Redis (cache-aside, from Day 8)            |
-| Messaging               | RabbitMQ (from Day 11)                     |
+| Messaging               | Apache Kafka (KRaft mode, from Day 11)     |
 | Testing                  | JUnit 5, Mockito, Testcontainers            |
 | Build                     | Maven                                       |
 | Containerization           | Docker / Docker Compose                     |
@@ -29,7 +29,7 @@ A production-grade event/ticket booking system demonstrating optimistic locking 
 
 ## Running locally
 
-1. Start Postgres + Redis:
+1. Start Postgres + Redis + Kafka:
    ```bash
    docker compose up -d
    ```
@@ -74,6 +74,7 @@ All datasource settings are overridable via environment variables, with sane loc
 | `DB_PASSWORD`           | `eventhub_pass`          | Local dev only — never used as-is in a real deployment |
 | `REDIS_HOST`              | `localhost`                |                                            |
 | `REDIS_PORT`                | `6380`                        | Matches the host port in `docker-compose.yml` |
+| `KAFKA_BOOTSTRAP_SERVERS`     | `localhost:9094`                | Matches the host port in `docker-compose.yml`, not Kafka's usual `9092` — see the Day 11 write-up for why |
 | `SERVER_PORT`             | `8080`                    |                                            |
 
 ## API reference
@@ -289,6 +290,13 @@ docker exec eventhub-redis redis-cli KEYS 'seat-availability*'  # empty - evicte
 curl http://localhost:8080/api/v1/events/1/seats                # A2 shows RESERVED, no 30s wait
 ```
 
+**9. Kafka topology (Day 11)** — nothing publishes yet, so this just confirms the topic exists:
+
+```bash
+docker exec eventhub-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+# booking-confirmed-events
+```
+
 ## Project structure
 
 ```
@@ -368,7 +376,8 @@ src/main/java/com/ahdyahmed/eventhub/
 │       ├── BookingResponse.java
 │       └── BookingItemResponse.java
 └── config/
-    └── CacheConfig.java        # @EnableCaching + per-cache-name Redis TTLs
+    ├── CacheConfig.java        # @EnableCaching + per-cache-name Redis TTLs
+    └── KafkaTopicConfig.java   # topic topology (Day 11)
 
 src/main/resources/
 ├── application.yml
@@ -392,23 +401,29 @@ src/test/java/com/ahdyahmed/eventhub/
 
 Packages are organized **by feature (vertical slice)**, not by technical layer (i.e. no top-level `entity/`, `repository/`, `service/`, `controller/` packages holding everything). Each domain concept — `user`, `venue`, `event`, `seat`, `booking` — owns its own entity, repository, service, controller, and DTOs. This scales better than layer-first packaging once a domain has more than a handful of types.
 
-## What Day 10 adds
+## What Day 11 adds
 
-Every claim Days 8 and 9 made about caching — hit/miss behavior, eviction on write, freshness after a booking — had only ever been checked by hand, with `curl` and `redis-cli`. That's exactly how the three real Redis bugs on Day 8 got found, but manual checking doesn't stay done: nothing stopped a future change from quietly reintroducing any of them. `RedisCacheIT` is that missing safety net.
+Week 3 starts, and with it a deliberate deviation from the original plan: the roadmap this project started from explicitly chose RabbitMQ over Kafka for the event-driven pipeline, reasoning that *"Kafka is heavier to justify unless you want the extra flex."* This project takes that flex on purpose — Kafka's a more common ask in job postings for this kind of role, and the two aren't equivalent enough that "I did it with RabbitMQ" fully substitutes. See Design decisions for the fuller trade-off, not just the swap.
 
-- **A real Postgres *and* a real Redis, both via Testcontainers, in one test class** — `RedisCacheIT` follows `BookingConcurrencyIT`'s explicit `@BeforeAll`/`@AfterAll` container lifecycle (established Day 7 specifically because the `@Testcontainers`/`@Container` annotation pair failed unpredictably) and adds a second container: a plain `GenericContainer` for `redis:7-alpine`. No new dependency was needed for that — `GenericContainer` ships in the same `testcontainers` core artifact already pulled in by the Postgres and JUnit Jupiter modules.
-- **Hit/miss proven by counting real repository calls, not by inspecting Redis** — `@SpyBean` wraps the actual `EventRepository`/`SeatRepository` beans, and each hit/miss test calls a cached method twice, then asserts the repository was hit exactly once. That's the claim that actually matters to a caller ("did this reach the database again"), which is a stronger and more direct proof than parsing what `redis-cli KEYS` happens to return.
-- **Invalidation proven by re-reading, not by checking a key is gone** — each eviction test calls the write, then calls the read again and asserts it reflects the write (the renamed event's new name; the booked seat's `RESERVED` status). Confirming a Redis key is absent proves eviction ran; confirming the next read is correct proves eviction actually did its job. `RedisCacheIT`'s booking test is the same scenario the person building this project verified by hand over several `curl`/`redis-cli` round trips a few days ago — now it runs on every `mvn verify`.
-- **`clearInvocations()` and `cache.clear()` in a shared `@BeforeEach`** — `@SpyBean` wraps a singleton bean shared across every test method in the class (one Spring context, reused), so invocation counts and cache contents from one test would otherwise leak into the next and make a `times(1)` assertion mean "once more than the previous test already called it." Both are reset before every test so each one starts from a clean, honest baseline.
-- **No changes to any production class** — this is intentionally a pure test-coverage day. Everything it exercises (`@Cacheable`, `@CacheEvict`, `CacheManager.evict`) was already written on Days 8–9; Day 10 exists to prove it, not to add to it.
+- **`docker-compose.yml`** — a single-broker `apache/kafka:3.8.0` container in **KRaft mode**: no separate ZooKeeper container, because Kafka's own metadata quorum has been the officially supported mode since Kafka 3.7 and running one container instead of two is a straightforward win for a local dev stack. Host port `9094` (not Kafka's usual `9092`), same "don't clash with a locally running instance" reasoning as Postgres (`5433`) and Redis (`6380`) — except here the port also has to be repeated in `KAFKA_ADVERTISED_LISTENERS`, since Kafka's client protocol has the broker *tell* connecting clients which address to send requests to, and that address has to be the one actually reachable from outside the container.
+- **`KafkaTopicConfig`** — one `NewTopic` bean, `booking-confirmed-events`, the equivalent of declaring a queue and its binding in RabbitMQ. Spring Boot's autoconfigured `KafkaAdmin` reconciles every `NewTopic` bean against the broker on startup; nothing in application code calls this class directly, the same way nothing calls a Flyway migration directly.
+- **3 partitions, 1 replica — for two different reasons, not the same one** — partition count is fixed for a topic's lifetime in any way that matters (adding more later breaks the key→partition mapping any existing keyed messages relied on), so 3 is a realistic starting point chosen now rather than "1, because that's all this demo needs." Replica count of 1 isn't a similar simplification — it's a hard constraint of running exactly one broker locally; a real deployment would run this at 3, same as the `KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR` etc. set in the broker's own config.
+- **Producer serialization is JSON with type headers turned off** (`spring.json.add.type.headers: false`) — Spring Kafka's default `JsonSerializer` stamps every message with a `__TypeId__` header containing the producer's fully-qualified Java class name. That's an implementation detail of this app leaking onto the wire; a consumer inside this same app can deserialize a known event type from the topic name alone, the same way any other message contract works, without needing to know this app's package structure.
+- **Topology only — nothing publishes yet.** No `BookingConfirmedEvent` class, no publish call in `BookingServiceImpl`. That's Day 12, deliberately kept separate: "the topic exists" and "something uses the topic" are different claims, and conflating them would make it harder to tell, a day from now, which day actually introduced a given piece of behavior.
 
-**Run it:**
+**Verify the topology exists**, with the stack up via `docker compose up -d` (give Kafka ~15–20s to finish its KRaft startup before this):
 
 ```bash
-mvn verify
+mvn spring-boot:run
 ```
 
-Runs `BookingConcurrencyIT` and `RedisCacheIT` back to back — two separate sets of Testcontainers (Postgres + Redis for the new one), so `mvn verify` takes noticeably longer than it did through Day 9. That's an accepted, deliberate trade-off for the coverage, not an oversight.
+then, once it's started:
+
+```bash
+docker exec eventhub-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+```
+
+should show `booking-confirmed-events` in the output — created by `KafkaAdmin` on application startup, not by anything you ran manually.
 
 ## Roadmap
 
@@ -427,16 +442,16 @@ Runs `BookingConcurrencyIT` and `RedisCacheIT` back to back — two separate set
 - [x] Day 10 — Testcontainers Redis test coverage
 
 **Week 3 — Event-driven architecture**
-- [ ] Day 11 — RabbitMQ setup + topology
+- [x] Day 11 — Kafka setup + topology (KRaft mode, no ZooKeeper)
 - [ ] Day 12 — publish `BookingConfirmedEvent`
 - [ ] Day 13 — notification consumer
 - [ ] Day 14 — mock payment step + booking status state machine
-- [ ] Day 15 — retry/DLQ for consumers + end-to-end event flow tests
+- [ ] Day 15 — retry/DLT for consumers + end-to-end event flow tests
 
 **Week 4 — Production readiness**
 - [ ] Day 16 — JWT auth + booking ownership checks, Actuator hardening
 - [ ] Day 17 — structured JSON logging with correlation IDs
-- [ ] Day 18 — multi-stage Dockerfile + full docker-compose stack (app + Postgres + Redis + RabbitMQ)
+- [ ] Day 18 — multi-stage Dockerfile + full docker-compose stack (app + Postgres + Redis + Kafka)
 - [ ] Day 19 — GitHub Actions CI (test + build on push)
 - [ ] Day 20 — GitHub Actions CD (build & push image)
 - [ ] Day 21 — load test under concurrency, fix findings
@@ -486,3 +501,7 @@ Runs `BookingConcurrencyIT` and `RedisCacheIT` back to back — two separate set
 - **`RedisCacheIT` proves invalidation by re-reading, not by checking Redis for an absent key** — asserting a key is gone from the cache proves the eviction call ran; it doesn't prove the *next read* is actually correct (a bug in the eviction's key computation could still leave the right cache entry, or drop the wrong one, while an unrelated key happens to also be absent). Calling the read again and asserting the response reflects the write is the stronger, more direct claim, and it's the one a caller of the API actually cares about.
 - **`@SpyBean` on the JPA repositories to prove cache hit/miss, not a mock or a Redis key inspection** — the repository being called a second time is the literal definition of a cache miss; counting real invocations on the real bean proves that directly, without needing to reason about what a particular Redis command's output implies about application behavior.
 - **`RedisCacheIT` adds a second Testcontainers container class rather than reusing `BookingConcurrencyIT`'s Postgres instance** — each `@SpringBootTest` class gets its own Spring context and its own container lifecycle by design in this codebase (see `BookingConcurrencyIT`'s and `EventhubApplicationTests`' own containers); sharing a container across test classes is a legitimate optimization some projects make, but it wasn't worth the added lifecycle-coordination complexity for a portfolio-sized suite where `mvn verify` running a bit longer is a fully acceptable trade-off.
+- **Kafka instead of RabbitMQ, deviating from the original plan on purpose** — the roadmap this project started from picked RabbitMQ specifically because *"Kafka is heavier to justify unless you want the extra flex."* Taking that flex anyway is a deliberate trade: Kafka's operational model (partitions, consumer groups, offsets, log retention instead of a queue that empties) is a different, and for many roles a more commonly asked-about, mental model than RabbitMQ's — and it's worth being able to speak to both models' trade-offs rather than just one. The honest cost, named rather than hidden: RabbitMQ's routing (exchanges, bindings, routing keys) maps more directly onto "notify these different consumers about this one event" than Kafka's topic-and-partition model does, so some of what would have been exchange/binding configuration in Week 3 will instead show up as consumer group and topic design decisions. Both are legitimate ways to solve the same problem; this project is just solving it with the other one.
+- **KRaft mode, not Kafka + ZooKeeper** — a second container (`bitnami/zookeeper` or similar) to coordinate a *single* broker would have added an entire extra moving part for no operational benefit this project actually needs. KRaft has been Kafka's officially supported mode without ZooKeeper since 3.7, so this isn't a shortcut relative to how Kafka is actually run today — running ZooKeeper here would be the outdated choice, not the safe one.
+- **Kafka's host port is 9094, and that same number has to appear twice, not once** — Postgres and Redis only needed their non-default host port set in one place (the `ports:` mapping); Kafka's client protocol requires the broker to also declare that same address in `KAFKA_ADVERTISED_LISTENERS`, because after a client's initial connection, the broker's metadata response tells that client which address to use for every subsequent request. Get the two out of sync and the container looks like it started fine, right up until the app tries to actually produce anything and fails to reach the address it was told to use.
+- **3 partitions declared now, even against a single local broker with nothing publishing yet** — partition count is fixed for a topic's practical lifetime (raising it later reshuffles which partition a given key lands on, breaking ordering guarantees for anything already relying on the old mapping), so it's a decision worth making deliberately once, now, rather than defaulting to 1 and having to revisit it under real load later. Replica count of 1 is not the same kind of decision — it's simply the largest number a single-broker cluster can support, not a preference.

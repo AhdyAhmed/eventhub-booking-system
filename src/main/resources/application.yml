@@ -37,6 +37,21 @@ spring:
       time-to-live: 2m
       cache-null-values: false
 
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9094}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        # JsonSerializer adds a __TypeId__ header with the producer's fully
+        # qualified Java class name by default. That's an internal
+        # implementation detail (this app's package structure) leaking onto
+        # the wire, and it means an external, non-Java consumer would need
+        # to know this app's class names to make sense of the header. A
+        # consumer inside this app can deserialize into a known event type
+        # from the topic name alone, same as any other message contract.
+        spring.json.add.type.headers: false
+
 server:
   port: ${SERVER_PORT:8080}
 
