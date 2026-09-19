@@ -2,7 +2,7 @@
 
 A production-grade event/ticket booking system demonstrating optimistic locking under concurrency, Redis caching, and event-driven order processing in Spring Boot. This is Project 3 of a 3-project backend portfolio (Core REST API → Auth & Authorization → **Production-grade Booking/Order System**).
 
-**Status:** 🚧 Day 8 — Redis cache-aside on the read-heavy endpoints. Cache invalidation on booking, the event-driven pipeline, auth, and production hardening land over the following days (see [Roadmap](#roadmap) below).
+**Status:** 🚧 Day 11 — Kafka topology in place (KRaft mode), nothing publishing to it yet. Publishing `BookingConfirmedEvent`, the notification/payment consumers, auth, and production hardening land over the following days (see [Roadmap](#roadmap) below).
 
 ---
 
