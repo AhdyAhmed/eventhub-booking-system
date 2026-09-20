@@ -2,7 +2,7 @@
 
 A production-grade event/ticket booking system demonstrating optimistic locking under concurrency, Redis caching, and event-driven order processing in Spring Boot. This is Project 3 of a 3-project backend portfolio (Core REST API → Auth & Authorization → **Production-grade Booking/Order System**).
 
-**Status:** 🚧 Day 11 — Kafka topology in place (KRaft mode), nothing publishing to it yet. Publishing `BookingConfirmedEvent`, the notification/payment consumers, auth, and production hardening land over the following days (see [Roadmap](#roadmap) below).
+**Status:** 🚧 Day 12 — booking confirmations publish to Kafka after commit. Nothing consumes them yet; the notification/payment consumers, auth, and production hardening land over the following days (see [Roadmap](#roadmap) below).
 
 ---
 
@@ -290,11 +290,25 @@ docker exec eventhub-redis redis-cli KEYS 'seat-availability*'  # empty - evicte
 curl http://localhost:8080/api/v1/events/1/seats                # A2 shows RESERVED, no 30s wait
 ```
 
-**9. Kafka topology (Day 11)** — nothing publishes yet, so this just confirms the topic exists:
+**9. Kafka topology (Day 11)** — confirms the topic exists:
 
 ```bash
 docker exec eventhub-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
 # booking-confirmed-events
+```
+
+**10. Booking event published (Day 12)** — a fresh booking, then read it back from the topic:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/events/1/seats -H "Content-Type: application/json" \
+  -d '{"seatNumber":"A3","section":"Floor","price":50.00}'
+
+curl -X POST http://localhost:8080/api/v1/bookings -H "Content-Type: application/json" \
+  -d '{"userId":1,"seatIds":[3]}'                                # books seat A3 (id 3)
+
+docker exec eventhub-kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic booking-confirmed-events --from-beginning --max-messages 1
+# {"bookingId":..,"userId":1,"eventId":1,"seatIds":[3],"totalAmount":50.00,"confirmedAt":"..."}
 ```
 
 ## Project structure
@@ -371,10 +385,13 @@ src/main/java/com/ahdyahmed/eventhub/
 │   ├── BookingServiceImpl.java     # the optimistic-locking reservation logic
 │   ├── BookingController.java
 │   ├── BookingMapper.java
-│   └── dto/
-│       ├── BookingRequest.java
-│       ├── BookingResponse.java
-│       └── BookingItemResponse.java
+│   ├── dto/
+│   │   ├── BookingRequest.java
+│   │   ├── BookingResponse.java
+│   │   └── BookingItemResponse.java
+│   └── event/                      # Day 12
+│       ├── BookingConfirmedEvent.java
+│       └── BookingConfirmedEventPublisher.java   # AFTER_COMMIT bridge to Kafka
 └── config/
     ├── CacheConfig.java        # @EnableCaching + per-cache-name Redis TTLs
     └── KafkaTopicConfig.java   # topic topology (Day 11)
@@ -401,29 +418,27 @@ src/test/java/com/ahdyahmed/eventhub/
 
 Packages are organized **by feature (vertical slice)**, not by technical layer (i.e. no top-level `entity/`, `repository/`, `service/`, `controller/` packages holding everything). Each domain concept — `user`, `venue`, `event`, `seat`, `booking` — owns its own entity, repository, service, controller, and DTOs. This scales better than layer-first packaging once a domain has more than a handful of types.
 
-## What Day 11 adds
+## What Day 12 adds
 
-Week 3 starts, and with it a deliberate deviation from the original plan: the roadmap this project started from explicitly chose RabbitMQ over Kafka for the event-driven pipeline, reasoning that *"Kafka is heavier to justify unless you want the extra flex."* This project takes that flex on purpose — Kafka's a more common ask in job postings for this kind of role, and the two aren't equivalent enough that "I did it with RabbitMQ" fully substitutes. See Design decisions for the fuller trade-off, not just the swap.
+Something actually publishes to the topic Day 11 set up: a successful booking now produces a `BookingConfirmedEvent` to Kafka. The interesting part isn't the publish call itself — it's *when* it happens relative to the database commit, which the roadmap flagged as worth thinking about rather than glossing over.
 
-- **`docker-compose.yml`** — a single-broker `apache/kafka:3.8.0` container in **KRaft mode**: no separate ZooKeeper container, because Kafka's own metadata quorum has been the officially supported mode since Kafka 3.7 and running one container instead of two is a straightforward win for a local dev stack. Host port `9094` (not Kafka's usual `9092`), same "don't clash with a locally running instance" reasoning as Postgres (`5433`) and Redis (`6380`) — except here the port also has to be repeated in `KAFKA_ADVERTISED_LISTENERS`, since Kafka's client protocol has the broker *tell* connecting clients which address to send requests to, and that address has to be the one actually reachable from outside the container.
-- **`KafkaTopicConfig`** — one `NewTopic` bean, `booking-confirmed-events`, the equivalent of declaring a queue and its binding in RabbitMQ. Spring Boot's autoconfigured `KafkaAdmin` reconciles every `NewTopic` bean against the broker on startup; nothing in application code calls this class directly, the same way nothing calls a Flyway migration directly.
-- **3 partitions, 1 replica — for two different reasons, not the same one** — partition count is fixed for a topic's lifetime in any way that matters (adding more later breaks the key→partition mapping any existing keyed messages relied on), so 3 is a realistic starting point chosen now rather than "1, because that's all this demo needs." Replica count of 1 isn't a similar simplification — it's a hard constraint of running exactly one broker locally; a real deployment would run this at 3, same as the `KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR` etc. set in the broker's own config.
-- **Producer serialization is JSON with type headers turned off** (`spring.json.add.type.headers: false`) — Spring Kafka's default `JsonSerializer` stamps every message with a `__TypeId__` header containing the producer's fully-qualified Java class name. That's an implementation detail of this app leaking onto the wire; a consumer inside this same app can deserialize a known event type from the topic name alone, the same way any other message contract works, without needing to know this app's package structure.
-- **Topology only — nothing publishes yet.** No `BookingConfirmedEvent` class, no publish call in `BookingServiceImpl`. That's Day 12, deliberately kept separate: "the topic exists" and "something uses the topic" are different claims, and conflating them would make it harder to tell, a day from now, which day actually introduced a given piece of behavior.
+- **`BookingConfirmedEvent`** — one record, doing double duty as both the in-JVM Spring `ApplicationEvent` payload and the exact JSON body a Kafka consumer receives on `booking-confirmed-events`. One shape for both, instead of a hand-maintained mapping between "what happened" and "what we told Kafka happened" that could quietly drift.
+- **`BookingConfirmedEventPublisher`, not a direct `KafkaTemplate.send()` call in `BookingServiceImpl`** — `BookingServiceImpl.create()` calls `ApplicationEventPublisher.publishEvent(...)`, which is a synchronous, in-memory, zero-I/O operation; it does not talk to Kafka. `BookingConfirmedEventPublisher` listens for that event with `@TransactionalEventListener(phase = AFTER_COMMIT)`, so the actual Kafka send only happens — and the listener method only runs at all — if the booking's transaction actually committed. If something later in that transaction rolled back, the listener is simply never invoked. No compensating message, no "oops, undo that" event, because nothing was ever sent to undo.
+- **This is not the outbox pattern, on purpose, and the gap that leaves is named rather than hidden** — the roadmap calls the transactional outbox the fuller guarantee and treats skipping it as an accepted trade-off for a project this size, not an oversight. The residual risk with `AFTER_COMMIT` alone: the database commit and the Kafka send are still two separate, non-atomic operations. A crash in the narrow window after commit but before the send completes means the booking exists in Postgres with no event ever reaching Kafka, and nothing to detect or replay it. Closing that gap for real means a table written in the same transaction as the booking, plus a separate poller — real infrastructure, deliberately not built for a portfolio-sized failure window. See Design decisions for the fuller version of this trade-off.
+- **Fire-and-forget on the producer side, and what that actually means under test** — `BookingConcurrencyIT` (Day 7) and `RedisCacheIT` (Day 10) both create real bookings, which now both attempt a real Kafka publish — but neither of those test classes runs a Kafka container. Because the publish is non-blocking (`KafkaTemplate.send()` returns a future without waiting for a broker connection), this doesn't fail either test; it just logs a connection-refused error on a background thread that neither test's assertions ever look at. Worth knowing about if you see it in test output — it's expected noise, not a break, and proper Kafka-backed coverage of the publish itself is Day 15's job (see that day's write-up when it lands).
 
-**Verify the topology exists**, with the stack up via `docker compose up -d` (give Kafka ~15–20s to finish its KRaft startup before this):
-
-```bash
-mvn spring-boot:run
-```
-
-then, once it's started:
+**Try it** (with the stack up via `docker compose up -d`, Kafka given its ~15–20s KRaft startup time):
 
 ```bash
-docker exec eventhub-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+curl -X POST http://localhost:8080/api/v1/bookings -H "Content-Type: application/json" \
+  -d '{"userId":1,"seatIds":[1]}'
 ```
 
-should show `booking-confirmed-events` in the output — created by `KafkaAdmin` on application startup, not by anything you ran manually.
+```bash
+# Consume one message from the topic to confirm it actually arrived
+docker exec eventhub-kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic booking-confirmed-events --from-beginning --max-messages 1
+```
 
 ## Roadmap
 
@@ -443,7 +458,7 @@ should show `booking-confirmed-events` in the output — created by `KafkaAdmin`
 
 **Week 3 — Event-driven architecture**
 - [x] Day 11 — Kafka setup + topology (KRaft mode, no ZooKeeper)
-- [ ] Day 12 — publish `BookingConfirmedEvent`
+- [x] Day 12 — publish `BookingConfirmedEvent`
 - [ ] Day 13 — notification consumer
 - [ ] Day 14 — mock payment step + booking status state machine
 - [ ] Day 15 — retry/DLT for consumers + end-to-end event flow tests
@@ -505,3 +520,7 @@ should show `booking-confirmed-events` in the output — created by `KafkaAdmin`
 - **KRaft mode, not Kafka + ZooKeeper** — a second container (`bitnami/zookeeper` or similar) to coordinate a *single* broker would have added an entire extra moving part for no operational benefit this project actually needs. KRaft has been Kafka's officially supported mode without ZooKeeper since 3.7, so this isn't a shortcut relative to how Kafka is actually run today — running ZooKeeper here would be the outdated choice, not the safe one.
 - **Kafka's host port is 9094, and that same number has to appear twice, not once** — Postgres and Redis only needed their non-default host port set in one place (the `ports:` mapping); Kafka's client protocol requires the broker to also declare that same address in `KAFKA_ADVERTISED_LISTENERS`, because after a client's initial connection, the broker's metadata response tells that client which address to use for every subsequent request. Get the two out of sync and the container looks like it started fine, right up until the app tries to actually produce anything and fails to reach the address it was told to use.
 - **3 partitions declared now, even against a single local broker with nothing publishing yet** — partition count is fixed for a topic's practical lifetime (raising it later reshuffles which partition a given key lands on, breaking ordering guarantees for anything already relying on the old mapping), so it's a decision worth making deliberately once, now, rather than defaulting to 1 and having to revisit it under real load later. Replica count of 1 is not the same kind of decision — it's simply the largest number a single-broker cluster can support, not a preference.
+- **`@TransactionalEventListener(AFTER_COMMIT)`, not a direct `KafkaTemplate.send()` inside `@Transactional`** — this is the specific problem the roadmap named for this day: publishing before a transaction commits means a consumer can react to a booking that later rolls back and never actually happened. Deferring the actual send to after commit turns "don't publish something that gets rolled back" from a race this code would otherwise have to reason about into a guarantee the framework enforces — the listener plainly cannot run for a transaction that didn't commit.
+- **Not a transactional outbox, and that gap is written down rather than left implicit** — `AFTER_COMMIT` closes the "published something false" problem but not the "silently published nothing" one: a crash between the commit and the Kafka send completing loses the event with nothing to detect or replay it. An outbox table plus a poller closes that gap for real, at the cost of genuine additional infrastructure. The roadmap treats that infrastructure as a stretch goal for a project this size, not a requirement — accepting the gap is the documented choice, not an unnoticed one.
+- **One record (`BookingConfirmedEvent`) serves as both the Spring `ApplicationEvent` payload and the Kafka message body** — a separate internal-event class and external-message class would need to be kept in sync by hand every time either one changed, with nothing enforcing that they actually stayed in sync. One shape used for both makes that drift structurally impossible instead of merely unlikely.
+- **The Kafka message key is `bookingId`, not `eventId` or `userId`** — Kafka only guarantees ordering within a partition, and the key decides which partition a message lands on. Keying by `bookingId` means every message about one specific booking — this `BookingConfirmedEvent` today, and whatever payment or cancellation events later days add for the same booking — is guaranteed to arrive at any one consumer in the order it was sent. Keying by `eventId` would group differently (all bookings for one concert together) at the cost of losing per-booking ordering guarantees; neither is "more correct," they answer different questions, and per-booking ordering is the one this pipeline actually needs.

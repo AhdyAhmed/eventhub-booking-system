@@ -10,6 +10,7 @@ import static org.mockito.Mockito.when;
 
 import com.ahdyahmed.eventhub.booking.dto.BookingRequest;
 import com.ahdyahmed.eventhub.booking.dto.BookingResponse;
+import com.ahdyahmed.eventhub.booking.event.BookingConfirmedEvent;
 import com.ahdyahmed.eventhub.common.exception.BookingValidationException;
 import com.ahdyahmed.eventhub.common.exception.ResourceNotFoundException;
 import com.ahdyahmed.eventhub.common.exception.SeatUnavailableException;
@@ -28,11 +29,13 @@ import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.cache.Cache;
 import org.springframework.cache.CacheManager;
 import org.springframework.cache.concurrent.ConcurrentMapCacheManager;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 
 /**
@@ -56,6 +59,9 @@ class BookingServiceImplTest {
     @Mock
     private UserRepository userRepository;
 
+    @Mock
+    private ApplicationEventPublisher eventPublisher;
+
     private final BookingMapper bookingMapper = new BookingMapper();
 
     // A real cache manager, not a mock: the eviction test needs actual
@@ -68,7 +74,7 @@ class BookingServiceImplTest {
     @BeforeEach
     void setUp() {
         bookingService = new BookingServiceImpl(bookingRepository, seatRepository, userRepository, bookingMapper,
-                cacheManager);
+                cacheManager, eventPublisher);
     }
 
     private User user(long id) {
@@ -117,6 +123,33 @@ class BookingServiceImplTest {
         assertThat(response.items()).hasSize(1);
         assertThat(response.totalAmount()).isEqualByComparingTo("50.00");
         assertThat(seat.getStatus()).isEqualTo(SeatStatus.RESERVED);
+    }
+
+    @Test
+    void create_happyPath_publishesBookingConfirmedEventWithCorrectFields() {
+        Event event = event(10L);
+        Seat seat = seat(100L, event, SeatStatus.AVAILABLE);
+
+        when(userRepository.findById(1L)).thenReturn(Optional.of(user(1L)));
+        when(seatRepository.findAllById(List.of(100L))).thenReturn(List.of(seat));
+        when(seatRepository.saveAndFlush(any(Seat.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(bookingRepository.save(any(Booking.class))).thenAnswer(inv -> {
+            Booking booking = inv.getArgument(0);
+            booking.setId(500L);
+            return booking;
+        });
+
+        bookingService.create(new BookingRequest(1L, List.of(100L)));
+
+        ArgumentCaptor<BookingConfirmedEvent> captor = ArgumentCaptor.forClass(BookingConfirmedEvent.class);
+        verify(eventPublisher).publishEvent(captor.capture());
+        BookingConfirmedEvent published = captor.getValue();
+        assertThat(published.bookingId()).isEqualTo(500L);
+        assertThat(published.userId()).isEqualTo(1L);
+        assertThat(published.eventId()).isEqualTo(10L);
+        assertThat(published.seatIds()).containsExactly(100L);
+        assertThat(published.totalAmount()).isEqualByComparingTo("50.00");
+        assertThat(published.confirmedAt()).isNotNull();
     }
 
     @Test

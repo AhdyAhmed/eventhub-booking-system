@@ -1,5 +1,6 @@
 package com.ahdyahmed.eventhub.booking;
 
+import com.ahdyahmed.eventhub.booking.event.BookingConfirmedEvent;
 import com.ahdyahmed.eventhub.common.exception.BookingValidationException;
 import com.ahdyahmed.eventhub.common.exception.ResourceNotFoundException;
 import com.ahdyahmed.eventhub.common.exception.SeatUnavailableException;
@@ -11,12 +12,14 @@ import com.ahdyahmed.eventhub.seat.SeatStatus;
 import com.ahdyahmed.eventhub.user.User;
 import com.ahdyahmed.eventhub.user.UserRepository;
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 import lombok.RequiredArgsConstructor;
 import org.springframework.cache.Cache;
 import org.springframework.cache.CacheManager;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -53,6 +56,7 @@ public class BookingServiceImpl implements BookingService {
     private final UserRepository userRepository;
     private final BookingMapper bookingMapper;
     private final CacheManager cacheManager;
+    private final ApplicationEventPublisher eventPublisher;
 
     @Override
     @Transactional
@@ -65,6 +69,7 @@ public class BookingServiceImpl implements BookingService {
             throw new ResourceNotFoundException("One or more seats were not found");
         }
         validateSingleEvent(seats);
+        Long eventId = seats.get(0).getEvent().getId();
 
         Booking booking = Booking.builder()
                 .user(user)
@@ -88,7 +93,13 @@ public class BookingServiceImpl implements BookingService {
         // but the seat-availability cache never found out. validateSingleEvent
         // already guarantees every seat here belongs to one event, so one
         // eviction covers the whole booking.
-        evictSeatAvailabilityCache(seats.get(0).getEvent().getId());
+        evictSeatAvailabilityCache(eventId);
+        // Day 12: publishing here, not sending to Kafka directly, is the
+        // point - see BookingConfirmedEventPublisher's class doc for why
+        // AFTER_COMMIT matters. This call just registers the event; nothing
+        // leaves the process until (and unless) this transaction commits.
+        eventPublisher.publishEvent(new BookingConfirmedEvent(
+                saved.getId(), user.getId(), eventId, request.seatIds(), total, Instant.now()));
         return bookingMapper.toResponse(saved);
     }
 
