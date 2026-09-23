@@ -1,0 +1,89 @@
+spring:
+  application:
+    name: eventhub-booking-system
+
+  datasource:
+    url: jdbc:postgresql://localhost:${DB_PORT:5433}/${DB_NAME:eventhub_db}
+    username: ${DB_USER:eventhub_user}
+    password: ${DB_PASSWORD:eventhub_pass}
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      # Schema is owned by Flyway migrations, never by Hibernate auto-ddl.
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: true
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6380}
+
+  cache:
+    type: redis
+    redis:
+      # Fallback only - every cache actually in use (events, event-search,
+      # seat-availability) has its own TTL set explicitly in CacheConfig,
+      # tuned per-cache as of Day 9. This value only applies if a cache name
+      # is ever added without a corresponding entry there.
+      time-to-live: 2m
+      cache-null-values: false
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9094}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        # JsonSerializer adds a __TypeId__ header with the producer's fully
+        # qualified Java class name by default. That's an internal
+        # implementation detail (this app's package structure) leaking onto
+        # the wire, and it means an external, non-Java consumer would need
+        # to know this app's class names to make sense of the header. A
+        # consumer inside this app can deserialize into a known event type
+        # from the topic name alone, same as any other message contract.
+        spring.json.add.type.headers: false
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        # Mirrors the producer's spring.json.add.type.headers: false - since
+        # no __TypeId__ header is ever sent, the deserializer needs to be
+        # told explicitly what type to expect instead of reading it off the
+        # message. trusted.packages is required by JsonDeserializer
+        # regardless (it refuses to deserialize into arbitrary classes by
+        # default, for the same reason Jackson's own polymorphic typing
+        # needs a validator - see CacheConfig's redisObjectMapper).
+        spring.json.trusted.packages: com.ahdyahmed.eventhub.booking.event
+        spring.json.use.type.headers: false
+        spring.json.value.default.type: com.ahdyahmed.eventhub.booking.event.BookingConfirmedEvent
+      # No group-id here on purpose - see NotificationListener's class doc
+      # for why each @KafkaListener sets its own instead of sharing one
+      # default.
+
+server:
+  port: ${SERVER_PORT:8080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: when-authorized
+      probes:
+        enabled: true
+
+logging:
+  level:
+    root: INFO
+    com.ahdyahmed.eventhub: DEBUG
