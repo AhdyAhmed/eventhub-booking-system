@@ -17,8 +17,6 @@ import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 import lombok.RequiredArgsConstructor;
-import org.springframework.cache.Cache;
-import org.springframework.cache.CacheManager;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
@@ -55,7 +53,7 @@ public class BookingServiceImpl implements BookingService {
     private final SeatRepository seatRepository;
     private final UserRepository userRepository;
     private final BookingMapper bookingMapper;
-    private final CacheManager cacheManager;
+    private final SeatAvailabilityCacheEvictor seatAvailabilityCacheEvictor;
     private final ApplicationEventPublisher eventPublisher;
 
     @Override
@@ -92,8 +90,12 @@ public class BookingServiceImpl implements BookingService {
         // Day 9: the gap flagged since Day 8 - a booking changes seat status
         // but the seat-availability cache never found out. validateSingleEvent
         // already guarantees every seat here belongs to one event, so one
-        // eviction covers the whole booking.
-        evictSeatAvailabilityCache(eventId);
+        // eviction covers the whole booking. Day 14: the eviction logic
+        // itself moved to SeatAvailabilityCacheEvictor, a shared bean -
+        // PaymentProcessedListener needs the identical eviction later in
+        // this same booking's life, once payment resolves the seats to
+        // BOOKED or back to AVAILABLE.
+        seatAvailabilityCacheEvictor.evict(eventId);
         // Day 12: publishing here, not sending to Kafka directly, is the
         // point - see BookingConfirmedEventPublisher's class doc for why
         // AFTER_COMMIT matters. This call just registers the event; nothing
@@ -141,37 +143,6 @@ public class BookingServiceImpl implements BookingService {
                 .size();
         if (distinctEvents > 1) {
             throw new BookingValidationException("All seats in a booking must belong to the same event");
-        }
-    }
-
-    /**
-     * Evicts exactly the {@code seat-availability} entries a booking for
-     * this event could have gone stale under.
-     *
-     * <p>{@code SeatServiceImpl.getByEvent}'s cache key is {@code
-     * eventId + "-" + status}, and {@code status} is either {@code null}
-     * (unfiltered) or one of {@link SeatStatus}'s three values — a small,
-     * fixed set known at compile time. That's the opposite situation from
-     * Day 8's {@code event-search} cache, whose key depends on arbitrary
-     * filter and paging combinations with no fixed upper bound, which is
-     * why that one is evicted with {@code allEntries = true} instead. Here,
-     * enumerating the exact keys is both possible and cheap, and — unlike
-     * {@code allEntries} — it leaves every other event's cached seat
-     * listings untouched.</p>
-     *
-     * <p>Uses {@link CacheManager} directly rather than {@code @CacheEvict}
-     * because the key to evict isn't known from this method's own
-     * parameters — it depends on the seats a booking touched, which
-     * {@code @CacheEvict}'s SpEL key expressions can't reach into.</p>
-     */
-    private void evictSeatAvailabilityCache(Long eventId) {
-        Cache cache = cacheManager.getCache("seat-availability");
-        if (cache == null) {
-            return;
-        }
-        cache.evict(eventId + "-null");
-        for (SeatStatus status : SeatStatus.values()) {
-            cache.evict(eventId + "-" + status);
         }
     }
 

@@ -42,7 +42,8 @@ import org.springframework.data.redis.serializer.RedisSerializationContext;
  * — not because it's the primary defense against staleness anymore
  * (eviction-on-write is, as of Day 9: see {@code EventServiceImpl}'s and
  * {@code SeatServiceImpl}'s {@code @CacheEvict} annotations and {@code
- * BookingServiceImpl.evictSeatAvailabilityCache}) but as a backstop for
+ * SeatAvailabilityCacheEvictor}, used from both {@code BookingServiceImpl}
+ * and, as of Day 14, {@code PaymentProcessedListener}) but as a backstop for
  * whatever eviction doesn't cover — a seat status changed by something
  * other than this app's own service layer (a direct DB write, an admin
  * tool, a future consumer that doesn't know this cache exists) still

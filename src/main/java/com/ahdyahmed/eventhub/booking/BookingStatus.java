@@ -1,10 +1,10 @@
 package com.ahdyahmed.eventhub.booking;
 
 /**
- * Booking lifecycle. The full state machine (which transitions are legal,
- * who can trigger them) is formalized on Day 14 alongside the mock payment
- * step — this enum just declares the states up front so the schema is
- * settled from Day 2 onward.
+ * Booking lifecycle. Declared in full since Day 2 so the schema never had
+ * to change shape later; the legal transitions between these states are
+ * formalized as of Day 14 in {@link BookingStateMachine}, driven by {@link
+ * PaymentProcessedListener} reacting to the mock payment step.
  */
 public enum BookingStatus {
     PENDING,

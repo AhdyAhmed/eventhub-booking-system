@@ -32,6 +32,16 @@ public class KafkaTopicConfig {
     public static final String BOOKING_CONFIRMED_TOPIC = "booking-confirmed-events";
 
     /**
+     * Day 14's topic: {@code PaymentConsumer} publishes here after mock-
+     * charging a {@code BookingConfirmedEvent}, and {@code
+     * PaymentProcessedListener} is the sole consumer that turns the result
+     * into a booking status transition. Same partitions/replicas reasoning
+     * as {@link #bookingConfirmedTopic()} below — nothing about this
+     * topic's traffic shape differs enough to justify a different number.
+     */
+    public static final String PAYMENT_PROCESSED_TOPIC = "payment-processed-events";
+
+    /**
      * 3 partitions even against a single local broker: partition count is
      * the unit of parallelism a Kafka topic can ever have (increasing it
      * later doesn't just work — added partitions break the key-to-partition
@@ -49,6 +59,14 @@ public class KafkaTopicConfig {
     @Bean
     public NewTopic bookingConfirmedTopic() {
         return TopicBuilder.name(BOOKING_CONFIRMED_TOPIC)
+                .partitions(3)
+                .replicas(1)
+                .build();
+    }
+
+    @Bean
+    public NewTopic paymentProcessedTopic() {
+        return TopicBuilder.name(PAYMENT_PROCESSED_TOPIC)
                 .partitions(3)
                 .replicas(1)
                 .build();

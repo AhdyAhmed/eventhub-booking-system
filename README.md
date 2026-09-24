@@ -2,7 +2,7 @@
 
 A production-grade event/ticket booking system demonstrating optimistic locking under concurrency, Redis caching, and event-driven order processing in Spring Boot. This is Project 3 of a 3-project backend portfolio (Core REST API → Auth & Authorization → **Production-grade Booking/Order System**).
 
-**Status:** 🚧 Day 13 — a notification consumer reacts to booking confirmations independently of the booking flow. The payment consumer, auth, and production hardening land over the following days (see [Roadmap](#roadmap) below).
+**Status:** 🚧 Day 14 — a mock payment step resolves every booking out of `PENDING`, with a formal state machine deciding what `CONFIRMED` or `FAILED` are allowed to mean. Retry/DLT, auth, and production hardening land over the following days (see [Roadmap](#roadmap) below).
 
 ---
 
@@ -319,6 +319,27 @@ Mock email -> ahmed@example.com: your booking .. for event 1 (1 seat(s), total 5
 
 Nothing in the `curl` request or `BookingServiceImpl` triggers that line directly — `NotificationListener` picked it up off the topic on its own.
 
+**12. Mock payment resolves the booking (Day 14)** — same booking as step 11 above; check the booking a moment later:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/events/1/seats -H "Content-Type: application/json" \
+  -d '{"seatNumber":"A4","section":"Floor","price":50.00}'
+
+curl -X POST http://localhost:8080/api/v1/bookings -H "Content-Type: application/json" \
+  -d '{"userId":1,"seatIds":[4]}'
+# {"id":..,"status":"PENDING",...}  <- right after the call, payment hasn't landed yet
+
+sleep 2
+curl http://localhost:8080/api/v1/bookings/<id-from-above>
+# {"id":..,"status":"CONFIRMED",...}  <- PaymentProcessedListener moved it, asynchronously
+
+docker exec eventhub-kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic payment-processed-events --from-beginning --max-messages 1
+# {"bookingId":..,"eventId":1,"seatIds":[4],"totalAmount":50.00,"status":"SUCCEEDED","reason":null,"processedAt":"..."}
+```
+
+To see the decline branch instead, book a seat priced above `payment.mock.decline-threshold` (default `1000.00`) — the booking settles on `FAILED` and the seat referenced above goes back to `AVAILABLE` (confirm with `GET /api/v1/events/1/seats`) instead of staying `RESERVED` forever.
+
 ## Project structure
 
 ```
@@ -332,6 +353,7 @@ src/main/java/com/ahdyahmed/eventhub/
 │   │   ├── ResourceNotFoundException.java
 │   │   ├── SeatUnavailableException.java   # 409 - business-state or optimistic-lock conflict
 │   │   ├── BookingValidationException.java # 400 - cross-field booking rules
+│   │   ├── InvalidBookingStateTransitionException.java  # 409 - illegal BookingStatus move (Day 14)
 │   │   ├── ErrorResponse.java      # one error shape for the whole API
 │   │   └── GlobalExceptionHandler.java
 │   └── validation/
@@ -388,6 +410,9 @@ src/main/java/com/ahdyahmed/eventhub/
 │   ├── Booking.java
 │   ├── BookingItem.java
 │   ├── BookingStatus.java
+│   ├── BookingStateMachine.java           # Day 14 - legal status transitions, formalized
+│   ├── SeatAvailabilityCacheEvictor.java  # Day 14 - eviction logic shared by booking + payment
+│   ├── PaymentProcessedListener.java      # Day 14 - @KafkaListener that drives the state machine
 │   ├── BookingRepository.java
 │   ├── BookingService.java
 │   ├── BookingServiceImpl.java     # the optimistic-locking reservation logic
@@ -402,9 +427,18 @@ src/main/java/com/ahdyahmed/eventhub/
 │       └── BookingConfirmedEventPublisher.java   # AFTER_COMMIT bridge to Kafka
 ├── notification/                   # Day 13
 │   └── NotificationListener.java   # @KafkaListener - the decoupling proof point
+├── payment/                        # Day 14
+│   ├── PaymentService.java         # mock-charge contract
+│   ├── PaymentResult.java
+│   ├── PaymentStatus.java
+│   ├── MockPaymentServiceImpl.java # deterministic threshold-based mock charge
+│   ├── PaymentConsumer.java        # @KafkaListener - booking-confirmed-events in, payment-processed-events out
+│   └── event/
+│       └── PaymentProcessedEvent.java
 └── config/
-    ├── CacheConfig.java        # @EnableCaching + per-cache-name Redis TTLs
-    └── KafkaTopicConfig.java   # topic topology (Day 11)
+    ├── CacheConfig.java                  # @EnableCaching + per-cache-name Redis TTLs
+    ├── KafkaTopicConfig.java             # topic topology (Day 11), now 2 topics
+    └── PaymentEventsConsumerConfig.java  # Day 14 - dedicated consumer factory for PaymentProcessedEvent
 
 src/main/resources/
 ├── application.yml
@@ -421,9 +455,14 @@ src/test/java/com/ahdyahmed/eventhub/
 │   ├── EventServiceImplTest.java
 │   └── dto/
 │       └── EventRequestValidationTest.java   # exercises both custom validators directly
-└── booking/
-    ├── BookingServiceImplTest.java      # unit: happy path + every failure mode, mocked repos
-    └── BookingConcurrencyIT.java        # integration: real concurrent HTTP requests, real Postgres
+├── booking/
+│   ├── BookingServiceImplTest.java      # unit: happy path + every failure mode, mocked repos
+│   ├── BookingConcurrencyIT.java        # integration: real concurrent HTTP requests, real Postgres
+│   ├── BookingStateMachineTest.java     # Day 14 - every legal/illegal transition, including terminal states
+│   └── PaymentProcessedListenerTest.java # Day 14 - status + seat + cache effects, mocked repo
+└── payment/
+    ├── MockPaymentServiceImplTest.java  # Day 14 - deterministic threshold behavior
+    └── PaymentConsumerTest.java         # Day 14 - charge result -> published event mapping
 ```
 
 Packages are organized **by feature (vertical slice)**, not by technical layer (i.e. no top-level `entity/`, `repository/`, `service/`, `controller/` packages holding everything). Each domain concept — `user`, `venue`, `event`, `seat`, `booking` — owns its own entity, repository, service, controller, and DTOs. This scales better than layer-first packaging once a domain has more than a handful of types.
@@ -454,6 +493,36 @@ Mock email -> ahmed@example.com: your booking 1 for event 1 (1 seat(s), total 50
 
 That log line, appearing without anything in `BookingServiceImpl` calling `NotificationListener` directly, is the actual thing this day proves.
 
+## What Day 14 adds
+
+The roadmap's own words for this day: "Add a mocked `PaymentService` → `PaymentProcessedEvent` → booking status update (PENDING → CONFIRMED)." Booking creation still leaves a booking in `PENDING`, exactly as before — what's new is that something now moves it out.
+
+- **`PaymentConsumer`** — a third independent consumer of `booking-confirmed-events` (own `groupId`: `payment-service`, alongside Day 13's `notification-service`), for the same reason both need their own group: neither should compete with the other for messages. Calls the mock `PaymentService`, then republishes the outcome as a `PaymentProcessedEvent` on a new `payment-processed-events` topic.
+- **`MockPaymentServiceImpl`** — the entire "charge a card" simulation: a comparison against a configurable threshold (`payment.mock.decline-threshold`, default `1000.00`), not a coin flip. Deterministic on purpose — a random mock would make every demo, log walk, and test run non-reproducible, the same reasoning behind Day 7's `CountDownLatch`-gated concurrency test instead of "just submit tasks and hope."
+- **`BookingStateMachine`** — formalizes the `BookingStatus` lifecycle that's existed since Day 2 as an unenforced enum. `PENDING → CONFIRMED`, `PENDING → FAILED`, and `PENDING`/`CONFIRMED → CANCELLED` are declared as legal; `FAILED` and `CANCELLED` are terminal. A same-status "transition" is treated as an idempotent no-op rather than an error — Kafka's at-least-once delivery means `PaymentProcessedListener` can see the same event twice, and a redelivery finding the booking already resolved shouldn't look like a bug.
+- **`PaymentProcessedListener`** — the consumer that actually matters: on `CONFIRMED`, seats move `RESERVED → BOOKED` (the sale is final); on `FAILED`, seats move back to `AVAILABLE` so someone else can book them instead of leaving them stuck behind a declined mock charge. Either way, `seat-availability` is evicted for the affected event — the same staleness bug Day 9 closed for booking creation would reopen here if payment resolution didn't evict too.
+- **`SeatAvailabilityCacheEvictor` extracted from `BookingServiceImpl`** — the exact key-enumeration logic Day 9 wrote as a private method now has two callers (`BookingServiceImpl` and `PaymentProcessedListener`); a shared bean means one definition of "every key this event's seats could be cached under," not two copies quietly drifting apart the next time `SeatStatus` gains a value.
+- **A second `@KafkaListener` container factory (`PaymentEventsConsumerConfig`)** — `application.yml`'s single global `spring.json.value.default.type` assumed exactly one event shape, true through Day 13 but no longer true once `PaymentProcessedEvent` existed. `PaymentProcessedListener` gets its own `ConsumerFactory` with its own default type rather than the two event types fighting over one shared property.
+- **`InvalidBookingStateTransitionException` → 409**, wired into `GlobalExceptionHandler` even though nothing HTTP-facing throws it yet — Day 16's planned booking-cancellation endpoint will call the same `BookingStateMachine.transition()`, and shouldn't need this mapping added retroactively when it does.
+
+**Try it** (with the stack up and the app running):
+
+```bash
+curl -X POST http://localhost:8080/api/v1/events/1/seats -H "Content-Type: application/json" \
+  -d '{"seatNumber":"A5","section":"Floor","price":50.00}'
+
+curl -X POST http://localhost:8080/api/v1/bookings -H "Content-Type: application/json" \
+  -d '{"userId":1,"seatIds":[5]}'
+```
+
+then, a moment later:
+
+```bash
+curl http://localhost:8080/api/v1/bookings/<id-from-above>
+# "status":"CONFIRMED" - PaymentProcessedListener moved it there off a Kafka message,
+# nothing in the curl request above asked for that directly.
+```
+
 ## Roadmap
 
 **Week 1 — Foundation & domain**
@@ -474,7 +543,7 @@ That log line, appearing without anything in `BookingServiceImpl` calling `Notif
 - [x] Day 11 — Kafka setup + topology (KRaft mode, no ZooKeeper)
 - [x] Day 12 — publish `BookingConfirmedEvent`
 - [x] Day 13 — notification consumer
-- [ ] Day 14 — mock payment step + booking status state machine
+- [x] Day 14 — mock payment step + booking status state machine
 - [ ] Day 15 — retry/DLT for consumers + end-to-end event flow tests
 
 **Week 4 — Production readiness**
@@ -541,3 +610,11 @@ That log line, appearing without anything in `BookingServiceImpl` calling `Notif
 - **Per-listener `groupId`, not one shared `spring.kafka.consumer.group-id` default** — a consumer group is Kafka's load-balancing unit: consumers *in the same group* split a topic's partitions between them, so only one gets any given message. That's correct for scaling one logical consumer horizontally, and wrong the moment a second, independent consumer needs to see every message too. `notification-service` gets its own group id specifically so Day 14's payment consumer (its own, different group id) isn't competing with it for the same messages — both need to see everything, not split it.
 - **`userEmail` added to `BookingConfirmedEvent` rather than giving `NotificationListener` a `UserRepository`** — the consumer needing contact info is a real requirement; reaching into the booking service's own database to get it is the wrong way to satisfy that requirement, because it means this "independent" consumer secretly isn't independent — it can't exist without booking's schema, booking's database credentials, and booking's uptime. Putting what a consumer needs directly on the event keeps the decoupling this whole day exists to prove actually true, not just true in the parts that are convenient.
 - **No retry or dead-letter handling for the consumer yet, matching the same "flag it, don't fix it early" pattern from Day 8→9** — an exception in `onBookingConfirmed` today is silently swallowed by Spring Kafka's default error handling; the notification for that one booking is simply lost. Building retry/DLT now would mean re-deriving Day 15's actual scope a day early under a different commit message. The gap is named in both the class doc and here rather than only being discoverable by triggering it.
+- **`MockPaymentServiceImpl` declines by a fixed threshold, not a random chance** — a coin-flip mock exercises both branches too, but makes every demo, log walk, and test run non-reproducible. Keying the decision off `totalAmount` means "book something under `payment.mock.decline-threshold`" and "book something over it" are two reliable, repeatable ways to walk either path on demand — the same reasoning behind Day 7's `CountDownLatch` barrier instead of a hopeful thread pool.
+- **`PaymentProcessedEvent` is one shape with a `status` field, not two separate event types (`PaymentSucceededEvent`/`PaymentFailedEvent`)** — one topic, one consumer method, with the branch happening in code that can see both outcomes together (and treat a redelivery of either the same way), rather than two independent listener methods that would need to agree by convention on things like "always evict the cache" instead of it being structurally guaranteed by one shared method body.
+- **`BookingStateMachine.transition()` treats a same-status request as a no-op, not an error** — Kafka's at-least-once delivery guarantee means `PaymentProcessedListener` can legitimately see the same `PaymentProcessedEvent` twice (a consumer restart mid-processing, a rebalance). The second delivery finding the booking already `CONFIRMED` is expected, ordinary behavior; throwing `InvalidBookingStateTransitionException` for it would mean logging a scary-looking 409-shaped error for something that isn't actually wrong.
+- **`CANCELLED` transitions declared in `BookingStateMachine` now, even though nothing can reach them yet** — same reasoning as `BookingStatus.CANCELLED` and `SeatStatus.BOOKED` themselves being declared back on Day 2 before anything set them: Day 16's planned cancellation endpoint needs `PENDING → CANCELLED` and `CONFIRMED → CANCELLED` to already be legal moves, not a schema/lifecycle change bundled into that day's actual scope (auth).
+- **A dedicated `ConsumerFactory`/`ConcurrentKafkaListenerContainerFactory` for `PaymentProcessedListener`, rather than widening the global default type** — `application.yml`'s `spring.json.value.default.type` is a single value shared by every listener on the default factory; it was sufficient through Day 13 because `NotificationListener` and `PaymentConsumer` (Day 14) both read `BookingConfirmedEvent` off the same topic. `PaymentProcessedListener` reads a different shape off a different topic, so it needed its own factory rather than the two event types contending over one shared property — a second `@KafkaListener` container factory is the smallest change that resolves that, reusing `KafkaProperties.buildConsumerProperties()` so only the one property that actually differs is overridden.
+- **Seats move to `BOOKED` on `CONFIRMED`, and back to `AVAILABLE` (not left `RESERVED`) on `FAILED`** — `RESERVED` was always meant to be the short-lived state between "seat picked" and "payment resolved," per `SeatStatus`'s own Day 2/6 doc comments. Leaving a seat `RESERVED` forever after a declined mock charge would mean a seat some other customer could legitimately book instead sits unusable indefinitely — releasing it is what "the payment failed" should actually mean for seat availability, not just for the booking record.
+- **`SeatAvailabilityCacheEvictor` extracted as a shared `@Component` rather than duplicated** — Day 9's private `evictSeatAvailabilityCache` method on `BookingServiceImpl` gained a second caller the moment `PaymentProcessedListener` needed the identical eviction after payment resolves seats. Two copies of "enumerate every `(eventId, status)` key" would drift the moment `SeatStatus` gains a fourth value and only one copy gets updated; one shared bean makes that drift impossible instead of just unlikely, the same reasoning `BaseEntity` gave for `equals`/`hashCode`.
+- **`InvalidBookingStateTransitionException` mapped to `409 Conflict` before anything HTTP-facing can throw it** — added to `GlobalExceptionHandler` alongside the exception itself rather than waiting for Day 16's cancellation endpoint to need it, on the same "the mapping belongs with the exception, not with whichever caller happens to need it first" reasoning as every other handler in that class.

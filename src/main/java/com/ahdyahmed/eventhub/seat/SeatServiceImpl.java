@@ -39,10 +39,11 @@ public class SeatServiceImpl implements SeatService {
 
     @Override
     @Transactional(readOnly = true)
-    // Freshness after a booking is handled by BookingServiceImpl.evictSeatAvailabilityCache,
-    // not here - that class knows which seats a booking touched and which
-    // event they belong to; this class doesn't. Flagged as an open gap
-    // through Day 8, closed Day 9.
+    // Freshness after a booking (or a payment resolving one, as of Day 14)
+    // is handled by SeatAvailabilityCacheEvictor, called from
+    // BookingServiceImpl and PaymentProcessedListener - not here, since
+    // this class doesn't know which seats a booking touched or which event
+    // they belong to. Flagged as an open gap through Day 8, closed Day 9.
     @Cacheable(cacheNames = "seat-availability", key = "#eventId + '-' + #status")
     public List<SeatResponse> getByEvent(Long eventId, SeatStatus status) {
         List<Seat> seats = (status == null)

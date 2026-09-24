@@ -62,12 +62,27 @@ spring:
         # regardless (it refuses to deserialize into arbitrary classes by
         # default, for the same reason Jackson's own polymorphic typing
         # needs a validator - see CacheConfig's redisObjectMapper).
-        spring.json.trusted.packages: com.ahdyahmed.eventhub.booking.event
+        # Day 14: broadened to include payment.event now that a second
+        # event type exists - this is the *trust* list (which packages are
+        # allowed at all), separate from value.default.type below (which
+        # class the *default* factory assumes). PaymentProcessedListener
+        # overrides that default on its own factory - see
+        # PaymentEventsConsumerConfig - but still needs its package trusted
+        # here.
+        spring.json.trusted.packages: com.ahdyahmed.eventhub.booking.event,com.ahdyahmed.eventhub.payment.event
         spring.json.use.type.headers: false
         spring.json.value.default.type: com.ahdyahmed.eventhub.booking.event.BookingConfirmedEvent
       # No group-id here on purpose - see NotificationListener's class doc
       # for why each @KafkaListener sets its own instead of sharing one
       # default.
+
+# Day 14: threshold the mock PaymentService declines above. Deliberately a
+# plain config value, not a random chance - see MockPaymentServiceImpl's
+# class doc for why determinism was chosen over simulating real-world
+# decline randomness.
+payment:
+  mock:
+    decline-threshold: 1000.00
 
 server:
   port: ${SERVER_PORT:8080}

@@ -64,17 +64,23 @@ class BookingServiceImplTest {
 
     private final BookingMapper bookingMapper = new BookingMapper();
 
-    // A real cache manager, not a mock: the eviction test needs actual
-    // get/put/evict semantics, and ConcurrentMapCacheManager gives that
-    // without needing Redis or Testcontainers for a plain unit test.
+    // A real cache manager, not a mock, wrapped in the real evictor (not a
+    // mock either) - the eviction test needs actual get/put/evict
+    // semantics, and ConcurrentMapCacheManager gives that without needing
+    // Redis or Testcontainers for a plain unit test. Same evictor instance
+    // PaymentProcessedListenerTest uses, for the same reason: it's the one
+    // place the "which keys does this event's seats live under" logic is
+    // defined, as of Day 14.
     private final CacheManager cacheManager = new ConcurrentMapCacheManager("seat-availability");
+    private final SeatAvailabilityCacheEvictor seatAvailabilityCacheEvictor =
+            new SeatAvailabilityCacheEvictor(cacheManager);
 
     private BookingServiceImpl bookingService;
 
     @BeforeEach
     void setUp() {
         bookingService = new BookingServiceImpl(bookingRepository, seatRepository, userRepository, bookingMapper,
-                cacheManager, eventPublisher);
+                seatAvailabilityCacheEvictor, eventPublisher);
     }
 
     private User user(long id) {

@@ -65,6 +65,20 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * Day 14: not reachable from an HTTP request yet — {@code
+     * PaymentProcessedListener} is the only caller of {@code
+     * BookingStateMachine.transition()} today, and it's a Kafka consumer,
+     * not a controller. Mapped here anyway so Day 16's booking-cancellation
+     * endpoint, which will call that same method, gets a clean 409 for
+     * free instead of falling through to {@link #handleUnexpected}.
+     */
+    @ExceptionHandler(InvalidBookingStateTransitionException.class)
+    public ResponseEntity<ErrorResponse> handleInvalidBookingStateTransition(
+            InvalidBookingStateTransitionException ex, HttpServletRequest request) {
+        return respond(HttpStatus.CONFLICT, ex.getMessage(), request);
+    }
+
+    /**
      * Defense in depth: {@code BookingServiceImpl} already catches the raw
      * optimistic-lock failure around each seat update and rethrows it as a
      * {@link SeatUnavailableException} with seat-specific context. This
