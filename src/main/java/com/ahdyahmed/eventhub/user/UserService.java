@@ -1,18 +1,15 @@
 package com.ahdyahmed.eventhub.user;
 
-import com.ahdyahmed.eventhub.user.dto.UserRequest;
 import com.ahdyahmed.eventhub.user.dto.UserResponse;
 
 /**
- * Deliberately minimal — just enough to create and look up a user so the
- * booking flow has someone to book on behalf of. This is a stand-in, not
- * real user management: no password, no roles, no update/delete. Day 16's
- * auth module is what actually owns registration; this will very likely be
- * revisited (or replaced outright) once that lands.
+ * Deliberately minimal: just a lookup. Creating a {@code User} moved to
+ * {@code AuthServiceImpl.register} on Day 16 - exactly the "revisited or
+ * replaced outright" this interface's own doc predicted back when it still
+ * owned {@code create()} - since a user can't exist in this app anymore
+ * without a password, and only the auth module is meant to ever set one.
  */
 public interface UserService {
-
-    UserResponse create(UserRequest request);
 
     UserResponse getById(Long id);
 

@@ -8,19 +8,18 @@ import com.ahdyahmed.eventhub.booking.BookingStatus;
  * e.g. a redelivered, out-of-order Kafka message trying to move an already
  * {@code CONFIRMED} booking to {@code FAILED}.
  *
- * <p>Mapped to {@code 409 Conflict} in {@link GlobalExceptionHandler} even
- * though nothing on the HTTP side throws it yet as of Day 15 — {@code
- * PaymentProcessedListener} is a Kafka consumer, not a controller, so an
- * uncaught instance there is handled by Day 15's {@code
- * KafkaErrorHandlingConfig} instead of this mapping: it's explicitly
- * registered as non-retryable on that shared error handler (retrying a
- * transition that's illegal by definition can't ever succeed), so it goes
- * straight to the dead-letter topic without the backoff delay a transient
- * failure would get first. The 409 mapping is here regardless because Day
- * 16's planned booking-cancellation endpoint will call the same {@code
- * transition()} method from an actual HTTP request path, and this
- * exception shouldn't need to change — or be remembered — when that
- * happens.</p>
+ * <p>Mapped to {@code 409 Conflict} in {@link GlobalExceptionHandler}. Two
+ * genuinely different callers can trigger it: {@code
+ * PaymentProcessedListener} (a Kafka consumer — an uncaught instance there
+ * is actually handled by Day 15's {@code KafkaErrorHandlingConfig} instead
+ * of this mapping, since it's registered as non-retryable on that shared
+ * error handler and goes straight to the dead-letter topic without a
+ * pointless backoff delay first), and, as of Day 16, {@code
+ * BookingServiceImpl.cancel} — a real HTTP request path, where this 409
+ * mapping is what a client actually sees for e.g. trying to cancel an
+ * already-{@code FAILED} booking. The mapping was written before that
+ * second caller existed specifically so this exception wouldn't need to
+ * change - or be remembered - once it did.</p>
  */
 public class InvalidBookingStateTransitionException extends RuntimeException {
 

@@ -19,6 +19,7 @@ import java.util.stream.Collectors;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -44,6 +45,13 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * <p>Day 7 is the test that actually fires two real concurrent requests at
  * the same seat and proves layer 2 holds when layer 1 can't.</p>
+ *
+ * <p>Day 16 added the ownership checks {@code getById} and {@code cancel}
+ * both start with — {@code requireOwnership} throws Spring Security's own
+ * {@link AccessDeniedException} rather than a project-specific one, since
+ * "you don't own this resource" is exactly what that exception already
+ * means, and reusing it means one line in {@code GlobalExceptionHandler}
+ * covers both this and any future ownership check the same way.</p>
  */
 @Service
 @RequiredArgsConstructor
@@ -54,13 +62,14 @@ public class BookingServiceImpl implements BookingService {
     private final UserRepository userRepository;
     private final BookingMapper bookingMapper;
     private final SeatAvailabilityCacheEvictor seatAvailabilityCacheEvictor;
+    private final BookingStateMachine bookingStateMachine;
     private final ApplicationEventPublisher eventPublisher;
 
     @Override
     @Transactional
-    public BookingResponse create(BookingRequest request) {
-        User user = userRepository.findById(request.userId())
-                .orElseThrow(() -> new ResourceNotFoundException("User not found with id " + request.userId()));
+    public BookingResponse create(Long userId, BookingRequest request) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new ResourceNotFoundException("User not found with id " + userId));
 
         List<Seat> seats = seatRepository.findAllById(request.seatIds());
         if (seats.size() != Set.copyOf(request.seatIds()).size()) {
@@ -107,10 +116,57 @@ public class BookingServiceImpl implements BookingService {
 
     @Override
     @Transactional(readOnly = true)
-    public BookingResponse getById(Long id) {
+    public BookingResponse getById(Long id, Long requestingUserId) {
         Booking booking = bookingRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Booking not found with id " + id));
+        requireOwnership(booking, requestingUserId);
         return bookingMapper.toResponse(booking);
+    }
+
+    /**
+     * The endpoint {@link BookingStateMachine}'s {@code PENDING → CANCELLED}
+     * and {@code CONFIRMED → CANCELLED} transitions were declared for, back
+     * on Day 14, unused until now. Releases every seat the booking held
+     * back to {@code AVAILABLE} regardless of whether payment had already
+     * resolved them to {@code BOOKED} or they were still {@code RESERVED} —
+     * either way, "cancelled" means the seat is free again.
+     *
+     * <p><strong>A known, accepted gap:</strong> {@code Booking} carries no
+     * {@code @Version} column the way {@link Seat} does, so this method and
+     * {@code PaymentProcessedListener} racing to update the *same* booking
+     * at the *same* moment (a user cancels in the exact window payment is
+     * being mock-processed) is a possible lost update — whichever write
+     * commits last wins outright, with no conflict detected. Day 16 is
+     * about authentication and ownership, not this concurrency question,
+     * so it's named here rather than silently accepted or, worse, papered
+     * over with a fix that isn't actually tested.</p>
+     */
+    @Override
+    @Transactional
+    public BookingResponse cancel(Long id, Long requestingUserId) {
+        Booking booking = bookingRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Booking not found with id " + id));
+        requireOwnership(booking, requestingUserId);
+
+        bookingStateMachine.transition(booking, BookingStatus.CANCELLED);
+
+        Long eventId = booking.getItems().get(0).getSeat().getEvent().getId();
+        booking.getItems().forEach(item -> item.getSeat().setStatus(SeatStatus.AVAILABLE));
+        seatAvailabilityCacheEvictor.evict(eventId);
+
+        Booking saved = bookingRepository.save(booking);
+        return bookingMapper.toResponse(saved);
+    }
+
+    /**
+     * Thrown as Spring Security's own {@link AccessDeniedException} rather
+     * than a hand-rolled one — see this class's own doc for why reusing it
+     * is deliberate, not a shortcut.
+     */
+    private void requireOwnership(Booking booking, Long requestingUserId) {
+        if (!booking.getUser().getId().equals(requestingUserId)) {
+            throw new AccessDeniedException("You do not have access to booking " + booking.getId());
+        }
     }
 
     /**

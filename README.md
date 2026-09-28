@@ -2,7 +2,7 @@
 
 A production-grade event/ticket booking system demonstrating optimistic locking under concurrency, Redis caching, and event-driven order processing in Spring Boot. This is Project 3 of a 3-project backend portfolio (Core REST API → Auth & Authorization → **Production-grade Booking/Order System**).
 
-**Status:** 🚧 Day 15 — every Kafka consumer in this project now retries a failing message with exponential backoff and dead-letters it if that's exhausted, and the full booking → payment → notification chain is proven end to end against a real broker. Auth and production hardening land over the following days (see [Roadmap](#roadmap) below).
+**Status:** 🚧 Day 16 — JWT auth is wired in: registration, login, and every booking endpoint restricted to its owner. Actuator now exposes metrics too, locked behind the same token. Production hardening (logging, Docker, CI) lands over the following days (see [Roadmap](#roadmap) below).
 
 ---
 
@@ -16,6 +16,7 @@ A production-grade event/ticket booking system demonstrating optimistic locking 
 | Migrations             | Flyway                                     |
 | Caching                | Redis (cache-aside, from Day 8)            |
 | Messaging               | Apache Kafka (KRaft mode, from Day 11)     |
+| Auth                     | Spring Security + stateless JWT (HS256, jjwt), from Day 16 |
 | Testing                  | JUnit 5, Mockito, Testcontainers (Postgres, Kafka), Awaitility |
 | Build                     | Maven                                       |
 | Containerization           | Docker / Docker Compose                     |
@@ -76,29 +77,37 @@ All datasource settings are overridable via environment variables, with sane loc
 | `REDIS_PORT`                | `6380`                        | Matches the host port in `docker-compose.yml` |
 | `KAFKA_BOOTSTRAP_SERVERS`     | `localhost:9094`                | Matches the host port in `docker-compose.yml`, not Kafka's usual `9092` — see the Day 11 write-up for why |
 | `SERVER_PORT`             | `8080`                    |                                            |
+| `JWT_SECRET`                | a local-dev placeholder      | **Must** be overridden in any real deployment — the default is committed to source control. Needs 32+ bytes for HS256 |
+| `JWT_EXPIRATION_MS`           | `3600000` (1 hour)             | Token lifetime                              |
 
 ## API reference
 
-| Method | Path                               | Purpose                                              |
-|--------|-------------------------------------|-------------------------------------------------------|
-| POST   | `/api/v1/venues`                     | Create a venue                                         |
-| GET    | `/api/v1/venues`                      | List all venues                                         |
-| GET    | `/api/v1/venues/{id}`                  | Get one venue                                            |
-| PUT    | `/api/v1/venues/{id}`                   | Update a venue                                            |
-| DELETE | `/api/v1/venues/{id}`                    | Delete a venue                                             |
-| POST   | `/api/v1/events`                          | Create an event (by `venueId`)                              |
-| GET    | `/api/v1/events`                           | Paginated, filterable, sortable event search — see [Usage examples](#usage-examples) |
-| GET    | `/api/v1/events/{id}`                       | Get one event                                                |
-| PUT    | `/api/v1/events/{id}`                        | Update an event                                               |
-| DELETE | `/api/v1/events/{id}`                         | Delete an event                                                |
-| POST   | `/api/v1/users`                                | Create a user (stand-in until Day 16's real auth)               |
-| GET    | `/api/v1/users/{id}`                            | Get one user                                                     |
-| POST   | `/api/v1/events/{eventId}/seats`                 | Add a seat to an event                                            |
-| GET    | `/api/v1/events/{eventId}/seats`                  | List an event's seats, optional `?status=` filter                 |
-| POST   | `/api/v1/bookings`                                 | Create a booking — reserves one or more seats                      |
-| GET    | `/api/v1/bookings/{id}`                             | Get one booking                                                     |
+| Method | Path                               | Auth required | Purpose                                              |
+|--------|-------------------------------------|:---:|-------------------------------------------------------|
+| POST   | `/api/v1/auth/register`              | No | Create a user + password, get a token back              |
+| POST   | `/api/v1/auth/login`                  | No | Exchange email + password for a token                   |
+| POST   | `/api/v1/venues`                     | Yes | Create a venue                                         |
+| GET    | `/api/v1/venues`                      | No | List all venues                                         |
+| GET    | `/api/v1/venues/{id}`                  | No | Get one venue                                            |
+| PUT    | `/api/v1/venues/{id}`                   | Yes | Update a venue                                            |
+| DELETE | `/api/v1/venues/{id}`                    | Yes | Delete a venue                                             |
+| POST   | `/api/v1/events`                          | Yes | Create an event (by `venueId`)                              |
+| GET    | `/api/v1/events`                           | No | Paginated, filterable, sortable event search — see [Usage examples](#usage-examples) |
+| GET    | `/api/v1/events/{id}`                       | No | Get one event                                                |
+| PUT    | `/api/v1/events/{id}`                        | Yes | Update an event                                               |
+| DELETE | `/api/v1/events/{id}`                         | Yes | Delete an event                                                |
+| GET    | `/api/v1/users/{id}`                            | Yes | Get one user                                                     |
+| POST   | `/api/v1/events/{eventId}/seats`                 | Yes | Add a seat to an event                                            |
+| GET    | `/api/v1/events/{eventId}/seats`                  | No | List an event's seats, optional `?status=` filter                 |
+| POST   | `/api/v1/bookings`                                 | Yes | Create a booking — reserves one or more seats, for the authenticated caller |
+| GET    | `/api/v1/bookings/{id}`                             | Yes | Get one booking — 403 if it isn't yours                             |
+| POST   | `/api/v1/bookings/{id}/cancel`                       | Yes | Cancel your own booking, releasing its seats             |
 
-Every `POST`/`PUT` body is validated (`@Valid`); every error response — validation failure, not-found, conflict, or unexpected — comes back in the one shape `ErrorResponse` defines. See [Usage examples](#usage-examples) for what each looks like.
+"No" means the endpoint is reachable without a token (public browsing, or the two endpoints whose whole job is to hand one out); everything marked "Yes" needs `Authorization: Bearer <token>` from `/api/v1/auth/login` or `/api/v1/auth/register`, or a `401` comes back instead. See [What Day 16 adds](#what-day-16-adds) for the full picture and [SecurityConfig](#project-structure)'s own reasoning for exactly where that line sits.
+
+Every `POST`/`PUT` body is validated (`@Valid`); every error response — validation failure, not-found, conflict, unauthorized, forbidden, or unexpected — comes back in the one shape `ErrorResponse` defines. See [Usage examples](#usage-examples) for what each looks like.
+
+**A note on the examples below:** sections through Day 15 predate authentication — their `curl` commands post a `userId` field with no `Authorization` header and won't run as-is against this version. The [What Day 16 adds](#what-day-16-adds) section has the current, runnable register → login → book → cancel flow.
 
 ## Usage examples
 
@@ -365,10 +374,23 @@ src/main/java/com/ahdyahmed/eventhub/
 │   ├── UserService.java
 │   ├── UserServiceImpl.java
 │   ├── UserController.java
-│   ├── UserMapper.java
+│   ├── UserMapper.java             # toResponse only - registration moved to auth/ (Day 16)
 │   └── dto/
-│       ├── UserRequest.java
 │       └── UserResponse.java
+├── auth/                           # Day 16
+│   ├── AuthController.java         # POST /register, POST /login - the only public write endpoints
+│   ├── AuthService.java
+│   ├── AuthServiceImpl.java        # the one place a raw password becomes a stored hash
+│   ├── UserPrincipal.java          # Spring Security UserDetails wrapper around User
+│   ├── EventHubUserDetailsService.java
+│   ├── JwtService.java             # sign + verify HS256 tokens (jjwt)
+│   ├── JwtProperties.java          # typed binding for security.jwt.*
+│   ├── JwtAuthenticationFilter.java       # Bearer token -> SecurityContext, once per request
+│   ├── JwtAuthenticationEntryPoint.java   # 401s from the filter chain in the API's own error shape
+│   └── dto/
+│       ├── RegisterRequest.java
+│       ├── LoginRequest.java
+│       └── AuthResponse.java
 ├── venue/
 │   ├── Venue.java
 │   ├── VenueRepository.java
@@ -439,14 +461,16 @@ src/main/java/com/ahdyahmed/eventhub/
     ├── CacheConfig.java                  # @EnableCaching + per-cache-name Redis TTLs
     ├── KafkaTopicConfig.java             # topic topology (Day 11), now 4 topics (2 + their DLTs)
     ├── PaymentEventsConsumerConfig.java  # Day 14 - dedicated consumer factory for PaymentProcessedEvent
-    └── KafkaErrorHandlingConfig.java     # Day 15 - shared retry + dead-letter-topic policy
+    ├── KafkaErrorHandlingConfig.java     # Day 15 - shared retry + dead-letter-topic policy
+    └── SecurityConfig.java               # Day 16 - stateless JWT filter chain, public vs. protected routes
 
 src/main/resources/
 ├── application.yml
 └── db/migration/
     ├── V1__baseline.sql
     ├── V2__domain_schema.sql             # users, venues, events, seats, bookings, booking_items
-    └── V3__seat_optimistic_locking.sql   # adds seats.version
+    ├── V3__seat_optimistic_locking.sql   # adds seats.version
+    └── V4__add_user_password.sql         # Day 16 - users.password_hash
 
 src/test/java/com/ahdyahmed/eventhub/
 ├── EventhubApplicationTests.java        # Testcontainers context + schema/entity consistency check
@@ -464,6 +488,9 @@ src/test/java/com/ahdyahmed/eventhub/
 └── payment/
     ├── MockPaymentServiceImplTest.java  # Day 14 - deterministic threshold behavior
     └── PaymentConsumerTest.java         # Day 14 - charge result -> published event mapping
+auth/
+├── JwtServiceTest.java             # Day 16 - round trip, wrong user, expiry, wrong secret
+└── AuthServiceImplTest.java        # Day 16 - register hashes the password; login/duplicate errors propagate
 integration/
 └── EventChainIT.java   # Day 15 - the full booking -> payment event -> notification event chain,
                          # plus a forced-failure retry-then-dead-letter test, against real Postgres + Kafka
@@ -557,6 +584,45 @@ docker exec eventhub-kafka /opt/kafka/bin/kafka-console-consumer.sh \
 
 Nothing appears there under normal operation — that topic only ever receives a message once this day's retry policy has already tried and given up on it.
 
+## What Day 16 adds
+
+The roadmap's own words: "Minimal JWT auth ... users can only view/cancel their own bookings. Actuator `/health`, `/info`, `/metrics` exposed properly (not wide open — lock down in `application.yml`)." Several things this codebase had been explicitly deferring to today finally landed together.
+
+- **`auth` package** — `AuthController` (`POST /api/v1/auth/register`, `POST /api/v1/auth/login`), `AuthServiceImpl`, and the JWT machinery: `JwtService` (HS256 via jjwt: sign a token carrying email as `sub` and `userId` as a claim, verify it later), `JwtAuthenticationFilter` (reads `Authorization: Bearer ...` once per request and populates the `SecurityContext`), `UserPrincipal` / `EventHubUserDetailsService` (the bridge between `User` and Spring Security's `UserDetails`). This is a compact from-scratch implementation — the roadmap says to reuse Project 2's patterns, but that code isn't part of this repository, so it follows the same standard filter + `UserDetailsService` shape rather than copying anything.
+- **`SecurityConfig`** — stateless (`SessionCreationPolicy.STATELESS`), CSRF off (no session cookie for it to protect). Public: `/api/v1/auth/**`, `GET` on `/api/v1/events/**` and `/api/v1/venues/**` (browsing, including an event's seat availability), and `/actuator/health/**`. Everything else — creating/editing events or seats, every booking endpoint, `/actuator/info` and `/actuator/metrics/**` — needs a valid token.
+- **Booking ownership** — `BookingRequest` lost its `userId` field (its own Day 6 doc predicted this): the booking owner is now the authenticated principal, passed to `BookingService.create(userId, request)` explicitly. `getById` and the new `cancel` both call `requireOwnership` and throw `AccessDeniedException` (→ `403`) for someone else's booking.
+- **`POST /api/v1/bookings/{id}/cancel`** — the endpoint `BookingStateMachine`'s `PENDING → CANCELLED` / `CONFIRMED → CANCELLED` transitions were declared for back on Day 14. Releases the booking's seats to `AVAILABLE` and evicts the seat-availability cache, reusing Day 14's `SeatAvailabilityCacheEvictor`. Cancelling an already-`FAILED` or already-`CANCELLED` booking hits `InvalidBookingStateTransitionException` → `409`.
+- **Actuator** — `metrics` added to the exposed endpoints alongside `health` and `info`. "Exposed" and "reachable by anyone" are different things: only `/actuator/health/**` is permitted anonymously (infrastructure probes can't carry a token); `info` and `metrics` sit behind the same token as everything else.
+- **`JwtAuthenticationEntryPoint`** — a missing or invalid token is rejected inside Spring Security's filter chain, below Spring MVC, so `GlobalExceptionHandler` can never see it. Without this class that case would return a bare `401` with no body, breaking the one-error-shape promise; with it, the response is the same `ErrorResponse` JSON as every other error.
+- **`users.password_hash`** via `V4__add_user_password.sql`; the user-creation endpoint (`POST /api/v1/users`) and `UserRequest` are gone, since registration now lives in `auth` and is the only path that can set a password.
+
+**Try it** (with the stack up and the app running):
+
+```bash
+# 1. register (returns a token immediately) - or POST /api/v1/auth/login later
+curl -s -X POST http://localhost:8080/api/v1/auth/register -H "Content-Type: application/json" \
+  -d '{"fullName":"Sara","email":"sara@example.com","password":"correct-horse-battery"}'
+# {"token":"eyJ...","userId":1,"fullName":"Sara","email":"sara@example.com"}
+
+TOKEN=<paste the token from above>
+
+# 2. create seats (needs auth now) and book one - note: no userId in the body anymore
+curl -X POST http://localhost:8080/api/v1/events/1/seats -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d '{"seatNumber":"B1","section":"Floor","price":50.00}'
+
+curl -X POST http://localhost:8080/api/v1/bookings -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d '{"seatIds":[7]}'
+
+# 3. cancel it - the seat goes back to AVAILABLE
+curl -X POST http://localhost:8080/api/v1/bookings/<id>/cancel -H "Authorization: Bearer $TOKEN"
+
+# 4. the things that should fail
+curl -i http://localhost:8080/api/v1/bookings/<id>                     # 401 - no token
+curl -i http://localhost:8080/actuator/metrics                         # 401 - metrics are locked
+curl -i http://localhost:8080/actuator/health                          # 200 - probes stay open
+# register a second user, then GET the first user's booking with their token -> 403
+```
+
 ## Roadmap
 
 **Week 1 — Foundation & domain**
@@ -581,7 +647,7 @@ Nothing appears there under normal operation — that topic only ever receives a
 - [x] Day 15 — retry/DLT for consumers + end-to-end event flow tests
 
 **Week 4 — Production readiness**
-- [ ] Day 16 — JWT auth + booking ownership checks, Actuator hardening
+- [x] Day 16 — JWT auth + booking ownership checks, Actuator hardening
 - [ ] Day 17 — structured JSON logging with correlation IDs
 - [ ] Day 18 — multi-stage Dockerfile + full docker-compose stack (app + Postgres + Redis + Kafka)
 - [ ] Day 19 — GitHub Actions CI (test + build on push)
@@ -609,7 +675,7 @@ Nothing appears there under normal operation — that topic only ever receives a
 - **One `ErrorResponse` shape for every exception, including validation failures** — a separate DTO for validation errors would mean clients need two error-parsing code paths instead of one with an optional field.
 - **The catch-all `Exception` handler logs full detail server-side but returns a generic message to the client** — returning stack traces or exception class names in a 500 response is an information-disclosure risk, not just unpolished output.
 - **Mappers are used for real in service unit tests, not mocked** — they have no dependencies and no side effects; mocking them would mean asserting against a canned `when(...)` response instead of their actual behavior, defeating the point of the test.
-- **`userId` is passed explicitly in the booking request body, not read from a security context** — there's no auth yet (Day 16). This is a known, temporary gap, flagged in the code so it doesn't get mistaken for the final design.
+- **`userId` was passed explicitly in the booking request body through Day 15** — there was no auth yet, and this was a known, temporary gap flagged in the code so it wouldn't get mistaken for the final design. Closed on Day 16: `BookingRequest` no longer has the field at all; the owner comes from the authenticated principal (see Day 16's bullets below).
 - **Seats move to `RESERVED`, not `BOOKED`, on booking creation** — `BOOKED` is reserved for after the (currently nonexistent) payment step confirms the booking on Day 14. Modeling that intermediate state now keeps the seat lifecycle honest instead of pretending a booking is final before money has changed hands.
 - **`saveAndFlush()` per seat instead of one flush at the end of the loop** — an optimistic-lock failure needs to be attributable to a specific seat; batching every update into one flush would still catch the conflict but lose that attribution in a multi-seat booking.
 - **Business-state conflict and optimistic-lock conflict both map to the same `SeatUnavailableException`** — a client asking "can I book seat 5" doesn't need to know whether the answer came from a status check or a version mismatch. Both mean the same thing: pick a different seat.
@@ -647,11 +713,11 @@ Nothing appears there under normal operation — that topic only ever receives a
 - **`MockPaymentServiceImpl` declines by a fixed threshold, not a random chance** — a coin-flip mock exercises both branches too, but makes every demo, log walk, and test run non-reproducible. Keying the decision off `totalAmount` means "book something under `payment.mock.decline-threshold`" and "book something over it" are two reliable, repeatable ways to walk either path on demand — the same reasoning behind Day 7's `CountDownLatch` barrier instead of a hopeful thread pool.
 - **`PaymentProcessedEvent` is one shape with a `status` field, not two separate event types (`PaymentSucceededEvent`/`PaymentFailedEvent`)** — one topic, one consumer method, with the branch happening in code that can see both outcomes together (and treat a redelivery of either the same way), rather than two independent listener methods that would need to agree by convention on things like "always evict the cache" instead of it being structurally guaranteed by one shared method body.
 - **`BookingStateMachine.transition()` treats a same-status request as a no-op, not an error** — Kafka's at-least-once delivery guarantee means `PaymentProcessedListener` can legitimately see the same `PaymentProcessedEvent` twice (a consumer restart mid-processing, a rebalance). The second delivery finding the booking already `CONFIRMED` is expected, ordinary behavior; throwing `InvalidBookingStateTransitionException` for it would mean logging a scary-looking 409-shaped error for something that isn't actually wrong.
-- **`CANCELLED` transitions declared in `BookingStateMachine` now, even though nothing can reach them yet** — same reasoning as `BookingStatus.CANCELLED` and `SeatStatus.BOOKED` themselves being declared back on Day 2 before anything set them: Day 16's planned cancellation endpoint needs `PENDING → CANCELLED` and `CONFIRMED → CANCELLED` to already be legal moves, not a schema/lifecycle change bundled into that day's actual scope (auth).
+- **`CANCELLED` transitions declared in `BookingStateMachine` on Day 14, before anything could reach them (Day 16 added the caller)** — same reasoning as `BookingStatus.CANCELLED` and `SeatStatus.BOOKED` themselves being declared back on Day 2 before anything set them: Day 16's planned cancellation endpoint needs `PENDING → CANCELLED` and `CONFIRMED → CANCELLED` to already be legal moves, not a schema/lifecycle change bundled into that day's actual scope (auth).
 - **A dedicated `ConsumerFactory`/`ConcurrentKafkaListenerContainerFactory` for `PaymentProcessedListener`, rather than widening the global default type** — `application.yml`'s `spring.json.value.default.type` is a single value shared by every listener on the default factory; it was sufficient through Day 13 because `NotificationListener` and `PaymentConsumer` (Day 14) both read `BookingConfirmedEvent` off the same topic. `PaymentProcessedListener` reads a different shape off a different topic, so it needed its own factory rather than the two event types contending over one shared property — a second `@KafkaListener` container factory is the smallest change that resolves that, reusing `KafkaProperties.buildConsumerProperties()` so only the one property that actually differs is overridden.
 - **Seats move to `BOOKED` on `CONFIRMED`, and back to `AVAILABLE` (not left `RESERVED`) on `FAILED`** — `RESERVED` was always meant to be the short-lived state between "seat picked" and "payment resolved," per `SeatStatus`'s own Day 2/6 doc comments. Leaving a seat `RESERVED` forever after a declined mock charge would mean a seat some other customer could legitimately book instead sits unusable indefinitely — releasing it is what "the payment failed" should actually mean for seat availability, not just for the booking record.
 - **`SeatAvailabilityCacheEvictor` extracted as a shared `@Component` rather than duplicated** — Day 9's private `evictSeatAvailabilityCache` method on `BookingServiceImpl` gained a second caller the moment `PaymentProcessedListener` needed the identical eviction after payment resolves seats. Two copies of "enumerate every `(eventId, status)` key" would drift the moment `SeatStatus` gains a fourth value and only one copy gets updated; one shared bean makes that drift impossible instead of just unlikely, the same reasoning `BaseEntity` gave for `equals`/`hashCode`.
-- **`InvalidBookingStateTransitionException` mapped to `409 Conflict` before anything HTTP-facing can throw it** — added to `GlobalExceptionHandler` alongside the exception itself rather than waiting for Day 16's cancellation endpoint to need it, on the same "the mapping belongs with the exception, not with whichever caller happens to need it first" reasoning as every other handler in that class.
+- **`InvalidBookingStateTransitionException` mapped to `409 Conflict` before anything HTTP-facing could throw it (Day 16's cancel endpoint now does)** — added to `GlobalExceptionHandler` alongside the exception itself rather than waiting for Day 16's cancellation endpoint to need it, on the same "the mapping belongs with the exception, not with whichever caller happens to need it first" reasoning as every other handler in that class.
 - **One shared `CommonErrorHandler`, wired in by replacing Spring Boot's auto-configured default `kafkaListenerContainerFactory` bean outright, rather than adding retry logic inside each listener method** — a `try/catch` with manual retry logic inside `onBookingConfirmed` would need to be written, tested, and kept in sync across three separate listener classes. Defining a bean with the exact name Boot's autoconfiguration would otherwise use means every listener that doesn't request a different factory picks up the identical policy for free, and there is exactly one place to change the backoff schedule later.
 - **Exponential backoff, not fixed-interval retry** — a transient failure (a momentary DB connection blip, a broker leader election mid-request) is more likely resolved by a slightly longer pause each attempt than by hammering it at a constant interval, which looks a lot like whatever caused the failure to keep failing. Capped at 5s between attempts and 10s cumulative — long enough to survive a brief blip, short enough that a genuinely broken consumer still reaches the dead-letter topic in well under a minute instead of retrying indefinitely.
 - **`InvalidBookingStateTransitionException` and `ResourceNotFoundException` registered as non-retryable exceptions** — both represent a permanent, logic-level problem that retrying cannot fix (a genuinely illegal state transition, or a `bookingId` on an event that doesn't exist in the database at all — not possible in normal operation, since `BookingConfirmedEventPublisher` only ever fires `AFTER_COMMIT`). Retrying either would just spend the full 10-second backoff budget before reaching the same dead-letter outcome anyway.
@@ -660,3 +726,11 @@ Nothing appears there under normal operation — that topic only ever receives a
 - **A dedicated `org.testcontainers:kafka` module dependency, unlike Redis's plain `GenericContainer`** — Redis (Day 10, `RedisCacheIT`) needed only a single exposed port and a trivial protocol, so a `GenericContainer` was the simpler choice there. Kafka's advertised-listener / broker-vs-client addressing is real complexity that a hand-rolled `GenericContainer` would mean reimplementing; testcontainers' purpose-built `KafkaContainer` exists specifically to hide that, which is the justification for reaching for a dedicated module here where Redis didn't need one.
 - **`@SpyBean` on `NotificationListener`, not `@MockBean`** — two of `EventChainIT`'s three tests need the listener's real behavior (a log line) to keep running so that "did notification receive this event" is a meaningful assertion; only the retry/DLT test stubs it to throw. A `@MockBean` would have silently no-op'd every invocation across all three tests, making the first two tests unable to tell "notified" from "not notified."
 - **Asserting "retried more than once," not an exact retry count, in the dead-letter test** — the exact number of attempts the 10-second exponential backoff budget produces depends on wall-clock timing that a loaded CI runner can legitimately skew. Asserting `atLeast(2)` invocations proves the retry policy actually ran before giving up, without making the test flaky over a detail (was it 3 attempts or 4?) that doesn't change whether the behavior being verified — retry, then dead-letter, instead of silent loss — is correct.
+- **The booking owner comes from the authenticated principal, and `BookingRequest.userId` was deleted rather than validated** — checking that a client-supplied id matches the token would still make the field meaningless at best and a spoofing surface at worst; removing it means there is no request-body path to booking on someone else's behalf at all. The service methods take the id as an explicit parameter instead of reading `SecurityContextHolder`, which keeps `BookingServiceImpl` free of any Spring Security dependency and its unit tests free of security scaffolding.
+- **Ownership is enforced in the service layer, not with URL rules or `@PreAuthorize`** — "is this *your* booking" depends on the specific row being loaded, which a static `authorizeHttpRequests` pattern can't express. Reusing Spring Security's own `AccessDeniedException` (not a custom exception) means one handler covers every current and future ownership check. Note the 403-vs-404 trade-off: a non-owner asking about a real booking id gets `403`, which confirms the id exists; returning `404` for both cases would hide that. Left as `403` for clarity — a deliberate, flagged simplification, not an oversight.
+- **Registration is one endpoint with no roles system** — every authenticated user has the same capabilities, so anyone logged in can currently create or edit events, venues, and seats. A real deployment would gate those behind an admin role; the roadmap's ownership requirement is specifically about bookings, so a roles model is out of scope here and named rather than silently absent.
+- **Wrong password and unknown email return the same `401 "Invalid email or password"`** — distinguishing them would let an attacker enumerate registered emails one login attempt at a time. Registration's duplicate-email check leans on the `UNIQUE` constraint (already mapped to `409`) instead of a pre-`SELECT`, since a check-then-insert would itself be a race.
+- **Stateless HS256 JWT with no refresh tokens or revocation** — the smallest thing that satisfies "minimal JWT auth." The trade-off: a token is valid until it expires (default one hour) even if the user is deleted or changes password. The signing secret in `application.yml` is a local-dev placeholder that is committed to source control; any real deployment must override it via `JWT_SECRET`.
+- **Cancelling races the payment listener, and that is a known, accepted gap** — `Booking` has no `@Version`, unlike `Seat`, so `cancel` and `PaymentProcessedListener` updating the same booking at the same instant is a possible lost update (last commit wins). Day 16 is about authentication and ownership; the gap is documented at the method rather than papered over with an untested fix.
+- **`POST .../cancel`, not `DELETE`** — cancelling transitions the booking's status and keeps the row queryable; `DELETE` implies the resource disappears.
+- **`JwtAuthenticationEntryPoint` exists because `@RestControllerAdvice` structurally cannot reach filter-chain rejections** — but no custom `AccessDeniedHandler` was added: this project has no role-based rules, and its only `403` (ownership) is thrown from service code, which the controller advice already handles.

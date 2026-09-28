@@ -12,6 +12,7 @@ import com.ahdyahmed.eventhub.booking.dto.BookingRequest;
 import com.ahdyahmed.eventhub.booking.dto.BookingResponse;
 import com.ahdyahmed.eventhub.booking.event.BookingConfirmedEvent;
 import com.ahdyahmed.eventhub.common.exception.BookingValidationException;
+import com.ahdyahmed.eventhub.common.exception.InvalidBookingStateTransitionException;
 import com.ahdyahmed.eventhub.common.exception.ResourceNotFoundException;
 import com.ahdyahmed.eventhub.common.exception.SeatUnavailableException;
 import com.ahdyahmed.eventhub.event.Event;
@@ -37,6 +38,7 @@ import org.springframework.cache.CacheManager;
 import org.springframework.cache.concurrent.ConcurrentMapCacheManager;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
+import org.springframework.security.access.AccessDeniedException;
 
 /**
  * Covers everything {@code BookingServiceImpl} can do except the one thing
@@ -46,6 +48,12 @@ import org.springframework.orm.ObjectOptimisticLockingFailureException;
  * is for. This class proves the surrounding logic — happy path, every
  * failure mode, and that the optimistic-lock exception gets translated
  * correctly — cheaply and without Docker.
+ *
+ * <p>Day 16 added the ownership tests for {@code getById} and {@code
+ * cancel} — both now take an explicit {@code requestingUserId}, mirrored
+ * here rather than through any Spring Security test scaffolding, since the
+ * service layer itself has no Spring Security dependency to mock (see
+ * {@code BookingService}'s own doc for why that separation was kept).</p>
  */
 @ExtendWith(MockitoExtension.class)
 class BookingServiceImplTest {
@@ -63,6 +71,7 @@ class BookingServiceImplTest {
     private ApplicationEventPublisher eventPublisher;
 
     private final BookingMapper bookingMapper = new BookingMapper();
+    private final BookingStateMachine bookingStateMachine = new BookingStateMachine();
 
     // A real cache manager, not a mock, wrapped in the real evictor (not a
     // mock either) - the eviction test needs actual get/put/evict
@@ -80,11 +89,12 @@ class BookingServiceImplTest {
     @BeforeEach
     void setUp() {
         bookingService = new BookingServiceImpl(bookingRepository, seatRepository, userRepository, bookingMapper,
-                seatAvailabilityCacheEvictor, eventPublisher);
+                seatAvailabilityCacheEvictor, bookingStateMachine, eventPublisher);
     }
 
     private User user(long id) {
-        return User.builder().id(id).fullName("Test User").email("test@example.com").build();
+        return User.builder().id(id).fullName("Test User").email("test@example.com")
+                .passwordHash("test-password-hash").build();
     }
 
     private Event event(long id) {
@@ -108,6 +118,15 @@ class BookingServiceImplTest {
                 .build();
     }
 
+    private Booking booking(long id, User owner, BookingStatus status, Seat... seats) {
+        Booking booking = Booking.builder().user(owner).status(status).totalAmount(new BigDecimal("50.00")).build();
+        booking.setId(id);
+        for (Seat seat : seats) {
+            booking.addItem(BookingItem.builder().seat(seat).priceAtBooking(seat.getPrice()).build());
+        }
+        return booking;
+    }
+
     @Test
     void create_happyPath_reservesSeatAndCreatesBooking() {
         User user = user(1L);
@@ -122,7 +141,7 @@ class BookingServiceImplTest {
             return booking;
         });
 
-        BookingResponse response = bookingService.create(new BookingRequest(1L, List.of(100L)));
+        BookingResponse response = bookingService.create(1L, new BookingRequest(List.of(100L)));
 
         assertThat(response.id()).isEqualTo(500L);
         assertThat(response.status()).isEqualTo(BookingStatus.PENDING);
@@ -145,7 +164,7 @@ class BookingServiceImplTest {
             return booking;
         });
 
-        bookingService.create(new BookingRequest(1L, List.of(100L)));
+        bookingService.create(1L, new BookingRequest(List.of(100L)));
 
         ArgumentCaptor<BookingConfirmedEvent> captor = ArgumentCaptor.forClass(BookingConfirmedEvent.class);
         verify(eventPublisher).publishEvent(captor.capture());
@@ -184,7 +203,7 @@ class BookingServiceImplTest {
         // A different event's cache entry - eviction must not touch this.
         cache.put("20-null", List.of());
 
-        bookingService.create(new BookingRequest(1L, List.of(100L)));
+        bookingService.create(1L, new BookingRequest(List.of(100L)));
 
         assertThat(cache.get("10-null")).isNull();
         assertThat(cache.get("10-AVAILABLE")).isNull();
@@ -197,7 +216,7 @@ class BookingServiceImplTest {
     void create_userMissing_throwsAndNeverTouchesSeatRepository() {
         when(userRepository.findById(99L)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> bookingService.create(new BookingRequest(99L, List.of(1L))))
+        assertThatThrownBy(() -> bookingService.create(99L, new BookingRequest(List.of(1L))))
                 .isInstanceOf(ResourceNotFoundException.class)
                 .hasMessageContaining("User");
 
@@ -210,7 +229,7 @@ class BookingServiceImplTest {
         when(seatRepository.findAllById(List.of(100L, 200L)))
                 .thenReturn(List.of(seat(100L, event(10L), SeatStatus.AVAILABLE)));
 
-        assertThatThrownBy(() -> bookingService.create(new BookingRequest(1L, List.of(100L, 200L))))
+        assertThatThrownBy(() -> bookingService.create(1L, new BookingRequest(List.of(100L, 200L))))
                 .isInstanceOf(ResourceNotFoundException.class)
                 .hasMessageContaining("seat");
     }
@@ -221,7 +240,7 @@ class BookingServiceImplTest {
         when(userRepository.findById(1L)).thenReturn(Optional.of(user(1L)));
         when(seatRepository.findAllById(List.of(100L))).thenReturn(List.of(seat));
 
-        assertThatThrownBy(() -> bookingService.create(new BookingRequest(1L, List.of(100L))))
+        assertThatThrownBy(() -> bookingService.create(1L, new BookingRequest(List.of(100L))))
                 .isInstanceOf(SeatUnavailableException.class);
 
         verify(seatRepository, never()).saveAndFlush(any());
@@ -235,7 +254,7 @@ class BookingServiceImplTest {
         when(seatRepository.saveAndFlush(any(Seat.class)))
                 .thenThrow(new ObjectOptimisticLockingFailureException(Seat.class, 100L));
 
-        assertThatThrownBy(() -> bookingService.create(new BookingRequest(1L, List.of(100L))))
+        assertThatThrownBy(() -> bookingService.create(1L, new BookingRequest(List.of(100L))))
                 .isInstanceOf(SeatUnavailableException.class);
 
         // The whole point: a lost race never reaches the point of persisting a booking.
@@ -249,7 +268,7 @@ class BookingServiceImplTest {
         when(userRepository.findById(1L)).thenReturn(Optional.of(user(1L)));
         when(seatRepository.findAllById(List.of(100L, 200L))).thenReturn(List.of(seatA, seatB));
 
-        assertThatThrownBy(() -> bookingService.create(new BookingRequest(1L, List.of(100L, 200L))))
+        assertThatThrownBy(() -> bookingService.create(1L, new BookingRequest(List.of(100L, 200L))))
                 .isInstanceOf(BookingValidationException.class);
     }
 
@@ -257,8 +276,84 @@ class BookingServiceImplTest {
     void getById_missing_throwsResourceNotFoundException() {
         when(bookingRepository.findById(404L)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> bookingService.getById(404L))
+        assertThatThrownBy(() -> bookingService.getById(404L, 1L))
                 .isInstanceOf(ResourceNotFoundException.class);
+    }
+
+    @Test
+    void getById_owner_returnsBooking() {
+        User owner = user(1L);
+        Booking booking = booking(500L, owner, BookingStatus.CONFIRMED, seat(100L, event(10L), SeatStatus.BOOKED));
+        when(bookingRepository.findById(500L)).thenReturn(Optional.of(booking));
+
+        BookingResponse response = bookingService.getById(500L, 1L);
+
+        assertThat(response.id()).isEqualTo(500L);
+    }
+
+    @Test
+    void getById_notOwner_throwsAccessDenied() {
+        User owner = user(1L);
+        Booking booking = booking(500L, owner, BookingStatus.CONFIRMED, seat(100L, event(10L), SeatStatus.BOOKED));
+        when(bookingRepository.findById(500L)).thenReturn(Optional.of(booking));
+
+        assertThatThrownBy(() -> bookingService.getById(500L, 2L))
+                .isInstanceOf(AccessDeniedException.class);
+    }
+
+    @Test
+    void cancel_ownerAndPending_releasesSeatAndCancelsBooking() {
+        User owner = user(1L);
+        Seat seat = seat(100L, event(10L), SeatStatus.RESERVED);
+        Booking booking = booking(500L, owner, BookingStatus.PENDING, seat);
+        when(bookingRepository.findById(500L)).thenReturn(Optional.of(booking));
+        when(bookingRepository.save(any(Booking.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        BookingResponse response = bookingService.cancel(500L, 1L);
+
+        assertThat(response.status()).isEqualTo(BookingStatus.CANCELLED);
+        assertThat(seat.getStatus()).isEqualTo(SeatStatus.AVAILABLE);
+    }
+
+    @Test
+    void cancel_ownerAndConfirmed_releasesBookedSeatToo() {
+        // A seat already resolved to BOOKED by PaymentProcessedListener
+        // still gets released on cancellation - "cancelled" means the seat
+        // is free again regardless of which state it was cancelled from.
+        User owner = user(1L);
+        Seat seat = seat(100L, event(10L), SeatStatus.BOOKED);
+        Booking booking = booking(500L, owner, BookingStatus.CONFIRMED, seat);
+        when(bookingRepository.findById(500L)).thenReturn(Optional.of(booking));
+        when(bookingRepository.save(any(Booking.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        bookingService.cancel(500L, 1L);
+
+        assertThat(seat.getStatus()).isEqualTo(SeatStatus.AVAILABLE);
+    }
+
+    @Test
+    void cancel_notOwner_throwsAccessDeniedAndNeverTouchesSeat() {
+        User owner = user(1L);
+        Seat seat = seat(100L, event(10L), SeatStatus.RESERVED);
+        Booking booking = booking(500L, owner, BookingStatus.PENDING, seat);
+        when(bookingRepository.findById(500L)).thenReturn(Optional.of(booking));
+
+        assertThatThrownBy(() -> bookingService.cancel(500L, 2L))
+                .isInstanceOf(AccessDeniedException.class);
+
+        assertThat(seat.getStatus()).isEqualTo(SeatStatus.RESERVED);
+        verify(bookingRepository, never()).save(any());
+    }
+
+    @Test
+    void cancel_alreadyFailed_throwsInvalidBookingStateTransitionException() {
+        User owner = user(1L);
+        Seat seat = seat(100L, event(10L), SeatStatus.AVAILABLE); // already released by PaymentProcessedListener
+        Booking booking = booking(500L, owner, BookingStatus.FAILED, seat);
+        when(bookingRepository.findById(500L)).thenReturn(Optional.of(booking));
+
+        assertThatThrownBy(() -> bookingService.cancel(500L, 1L))
+                .isInstanceOf(InvalidBookingStateTransitionException.class);
     }
 
 }

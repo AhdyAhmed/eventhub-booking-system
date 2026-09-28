@@ -9,6 +9,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.core.AuthenticationException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -65,17 +67,59 @@ public class GlobalExceptionHandler {
     }
 
     /**
-     * Day 14: not reachable from an HTTP request yet — {@code
-     * PaymentProcessedListener} is the only caller of {@code
-     * BookingStateMachine.transition()} today, and it's a Kafka consumer,
-     * not a controller. Mapped here anyway so Day 16's booking-cancellation
-     * endpoint, which will call that same method, gets a clean 409 for
-     * free instead of falling through to {@link #handleUnexpected}.
+     * As of Day 16, genuinely reachable from an HTTP request:
+     * {@code BookingServiceImpl.cancel} calls {@code
+     * BookingStateMachine.transition()} directly, so a client trying to
+     * cancel an already-{@code FAILED} or already-{@code CANCELLED} booking
+     * hits this. {@code PaymentProcessedListener}'s Kafka-side calls to the
+     * same method are unaffected by this handler — that's a consumer, not a
+     * controller, and its own exceptions are handled by Day 15's {@code
+     * KafkaErrorHandlingConfig} instead.
      */
     @ExceptionHandler(InvalidBookingStateTransitionException.class)
     public ResponseEntity<ErrorResponse> handleInvalidBookingStateTransition(
             InvalidBookingStateTransitionException ex, HttpServletRequest request) {
         return respond(HttpStatus.CONFLICT, ex.getMessage(), request);
+    }
+
+    /**
+     * Day 16: {@code BookingServiceImpl.requireOwnership} throws this exact
+     * exception type — Spring Security's own {@code AccessDeniedException},
+     * not a project-specific one — when a caller tries to view or cancel a
+     * booking that isn't theirs. Reusing Spring Security's type here, for an
+     * exception thrown from plain service-layer code with no Spring
+     * Security filter involved, is deliberate: "access denied" is exactly
+     * what it means regardless of which layer raises it, and one handler
+     * covers both this and anything else in the app that ever needs the
+     * same check.
+     */
+    @ExceptionHandler(AccessDeniedException.class)
+    public ResponseEntity<ErrorResponse> handleAccessDenied(AccessDeniedException ex, HttpServletRequest request) {
+        return respond(HttpStatus.FORBIDDEN, ex.getMessage(), request);
+    }
+
+    /**
+     * Day 16: {@code AuthServiceImpl.login} delegates to Spring Security's
+     * {@code AuthenticationManager}, which throws a subtype of this
+     * (typically {@code BadCredentialsException}) for a wrong password or
+     * an email with no matching account — {@code
+     * DaoAuthenticationProvider}'s default behavior deliberately doesn't
+     * distinguish the two in its own exception, so this handler can't
+     * either, and shouldn't try to: telling a caller "that email doesn't
+     * exist" vs. "that password is wrong" would hand an attacker a way to
+     * enumerate registered emails one login attempt at a time. One generic
+     * message for both cases closes that off. Note this is a completely
+     * separate path from {@link com.ahdyahmed.eventhub.auth.JwtAuthenticationEntryPoint} -
+     * that one handles a missing/invalid *token* on an already-protected
+     * endpoint, rejected by the security filter chain before reaching a
+     * controller at all; this one handles a failed *login attempt* inside
+     * {@code AuthServiceImpl}, a normal service-layer exception this
+     * {@code @RestControllerAdvice} catches the usual way.
+     */
+    @ExceptionHandler(AuthenticationException.class)
+    public ResponseEntity<ErrorResponse> handleAuthenticationException(AuthenticationException ex,
+                                                                        HttpServletRequest request) {
+        return respond(HttpStatus.UNAUTHORIZED, "Invalid email or password", request);
     }
 
     /**

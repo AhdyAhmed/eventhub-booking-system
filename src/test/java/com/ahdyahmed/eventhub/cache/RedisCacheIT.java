@@ -196,7 +196,7 @@ class RedisCacheIT {
         SeatResponse seat = seatService.create(event.id(), new SeatRequest(
                 "A1", "Floor", new BigDecimal("50.00")));
         User user = userRepository.save(User.builder().fullName("Cache Tester").email("cache-test@example.com")
-                .build());
+                .passwordHash("test-password-hash").build());
 
         // Cache the AVAILABLE listing - this is the read Day 9's fix
         // guarantees won't go stale after the booking below.
@@ -204,7 +204,7 @@ class RedisCacheIT {
         assertThat(beforeBooking).extracting(SeatResponse::status).containsExactly(SeatStatus.AVAILABLE);
         assertThat(cacheManager.getCache("seat-availability").get(event.id() + "-null")).isNotNull();
 
-        bookingService.create(new BookingRequest(user.getId(), List.of(seat.id())));
+        bookingService.create(user.getId(), new BookingRequest(List.of(seat.id())));
 
         assertThat(cacheManager.getCache("seat-availability").get(event.id() + "-null")).isNull();
         List<SeatResponse> afterBooking = seatService.getByEvent(event.id(), null);

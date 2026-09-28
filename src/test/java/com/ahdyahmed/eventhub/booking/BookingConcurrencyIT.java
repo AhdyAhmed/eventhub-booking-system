@@ -2,6 +2,8 @@ package com.ahdyahmed.eventhub.booking;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.ahdyahmed.eventhub.auth.JwtService;
+import com.ahdyahmed.eventhub.auth.UserPrincipal;
 import com.ahdyahmed.eventhub.event.Event;
 import com.ahdyahmed.eventhub.event.EventRepository;
 import com.ahdyahmed.eventhub.seat.Seat;
@@ -64,6 +66,13 @@ import org.testcontainers.containers.PostgreSQLContainer;
  * a random port, hit by real threads, is the only way to exercise the
  * actual transaction boundaries and let the database's row-level behavior
  * decide who wins — which is the entire thing being tested.</p>
+ *
+ * <p>Day 16: {@code POST /api/v1/bookings} now requires a valid bearer
+ * token. Rather than going through the HTTP register/login round trip for
+ * every test run, {@link JwtService} is autowired directly and asked to
+ * sign a token for the seeded test user — the concurrency behavior under
+ * test starts the instant the request reaches {@code BookingController},
+ * so how the token was obtained isn't part of what this test is proving.</p>
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class BookingConcurrencyIT {
@@ -107,10 +116,13 @@ class BookingConcurrencyIT {
     @Autowired
     private UserRepository userRepository;
 
+    @Autowired
+    private JwtService jwtService;
+
     private final TestRestTemplate restTemplate = new TestRestTemplate();
 
     private Long contestedSeatId;
-    private Long userId;
+    private String bearerToken;
 
     @BeforeEach
     void seedContestedSeat() {
@@ -136,9 +148,10 @@ class BookingConcurrencyIT {
         contestedSeatId = seat.getId();
 
         User user = userRepository.save(
-                User.builder().fullName("Race Tester").email("race-tester@example.com").build()
+                User.builder().fullName("Race Tester").email("race-tester@example.com")
+                        .passwordHash("test-password-hash").build()
         );
-        userId = user.getId();
+        bearerToken = jwtService.generateToken(new UserPrincipal(user));
     }
 
     @Test
@@ -156,7 +169,8 @@ class BookingConcurrencyIT {
         String url = "http://localhost:" + port + "/api/v1/bookings";
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
-        String requestBody = "{\"userId\":" + userId + ",\"seatIds\":[" + contestedSeatId + "]}";
+        headers.setBearerAuth(bearerToken);
+        String requestBody = "{\"seatIds\":[" + contestedSeatId + "]}";
         HttpEntity<String> request = new HttpEntity<>(requestBody, headers);
 
         for (int i = 0; i < CONCURRENT_ATTEMPTS; i++) {

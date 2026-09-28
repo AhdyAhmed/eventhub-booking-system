@@ -43,6 +43,41 @@
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
 
+        <!-- Auth (Day 16): JWT, reusing Spring Security rather than hand-rolling filter/session logic -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+        <!--
+            jjwt, not Nimbus or a hand-rolled HMAC implementation: a small,
+            purpose-built API (Jwts.builder()/.parser()) for exactly the
+            "sign a compact token, verify it later" scope this project
+            needs, versus Nimbus's broader (and heavier) OAuth2/OIDC-oriented
+            surface. Three artifacts, not one - jjwt-api is the compile-time
+            surface (Jwts, Claims); jjwt-impl and jjwt-jackson are runtime
+            implementation details (the actual signing/parsing logic, and
+            JSON (de)serialization via Jackson, which this project already
+            depends on transitively via spring-boot-starter-web) that
+            application code never references directly.
+        -->
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-api</artifactId>
+            <version>0.12.6</version>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-impl</artifactId>
+            <version>0.12.6</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-jackson</artifactId>
+            <version>0.12.6</version>
+            <scope>runtime</scope>
+        </dependency>
+
         <!-- Caching (Day 8): cache abstraction + Redis as the backing store -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

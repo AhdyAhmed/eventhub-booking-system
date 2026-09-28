@@ -19,10 +19,16 @@ import lombok.ToString;
 import lombok.experimental.SuperBuilder;
 
 /**
- * A registered user who can create bookings. Auth (password hash, roles,
- * JWT) is deliberately out of scope here and comes from the Project 2 auth
- * module when it's wired in on Day 16 — this entity only carries what the
- * booking domain itself needs.
+ * A registered user who can create bookings.
+ *
+ * <p>{@code passwordHash} arrived on Day 16 (see {@code
+ * V4__add_user_password.sql}) alongside the auth module that's the only
+ * thing allowed to set it — {@code AuthServiceImpl.register} is the one
+ * place a {@code User} gets constructed with a real hash; nothing else in
+ * this class or its mapper should ever see a raw password. Roles are still
+ * out of scope: every authenticated user has exactly the same
+ * permissions (see {@code SecurityConfig}'s own doc for why that's an
+ * accepted simplification, not an oversight).</p>
  */
 @Entity
 @Table(name = "users")
@@ -42,6 +48,13 @@ public class User extends BaseEntity {
     @ToString.Include
     @Column(nullable = false, unique = true, length = 255)
     private String email;
+
+    // Never included in toString() (no @ToString.Include) and never
+    // returned by UserMapper.toResponse - a bcrypt hash isn't a secret in
+    // the same way a raw password is, but it still has no reason to appear
+    // in a log line or an API response.
+    @Column(name = "password_hash", nullable = false, length = 255)
+    private String passwordHash;
 
     // PERSIST/MERGE only — deleting a user should never cascade-delete their
     // booking history. Removal, if ever needed, is a deliberate separate

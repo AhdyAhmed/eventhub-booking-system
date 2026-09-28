@@ -1,19 +1,19 @@
 package com.ahdyahmed.eventhub.booking.dto;
 
 import jakarta.validation.constraints.NotEmpty;
-import jakarta.validation.constraints.NotNull;
 import java.util.List;
 
 /**
- * {@code userId} is passed explicitly here rather than taken from a security
- * context — there's no auth yet (that's Day 16). Once JWT is wired in, this
- * will almost certainly change to read the current user from the
- * authenticated principal instead of trusting a client-supplied id.
+ * {@code userId} lived here through Day 15, with this class's own doc
+ * predicting exactly this change once auth existed: trusting a
+ * client-supplied id for "who is this booking for" would let any caller
+ * book seats in someone else's name simply by putting a different number in
+ * the request body. As of Day 16, {@code BookingController} reads the
+ * booking owner from the authenticated {@code UserPrincipal} instead and
+ * passes it to {@code BookingService.create} as an explicit parameter - not
+ * something a request body field, trusted or not, needs to carry anymore.
  */
 public record BookingRequest(
-        @NotNull(message = "userId is required")
-        Long userId,
-
         @NotEmpty(message = "seatIds must contain at least one seat")
         List<Long> seatIds
 ) {

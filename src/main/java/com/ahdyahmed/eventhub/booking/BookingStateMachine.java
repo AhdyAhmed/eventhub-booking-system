@@ -12,16 +12,17 @@ import org.springframework.stereotype.Component;
  * own Javadoc has pointed to since Day 2: which transitions are legal, and
  * what happens when something tries an illegal one.
  *
- * <p>Only two transitions are actually exercised as of Day 14 —
+ * <p>Through Day 15, only two transitions were actually exercised —
  * {@code PENDING → CONFIRMED} and {@code PENDING → FAILED}, both driven by
  * {@link PaymentProcessedListener}. {@code PENDING → CANCELLED} and
- * {@code CONFIRMED → CANCELLED} are declared here now, unused, for the same
- * reason {@code SeatStatus.BOOKED} and {@code BookingStatus.CANCELLED}
- * themselves were declared back on Day 2 before anything set them: Day 16's
- * planned booking-cancellation endpoint needs a legal path to reach {@code
- * CANCELLED} from either state a real booking could be cancelled from, and
- * the schema/lifecycle shouldn't need to change shape when that endpoint
- * arrives — only this table gains a caller.</p>
+ * {@code CONFIRMED → CANCELLED} were declared unused back then, for the
+ * same reason {@code SeatStatus.BOOKED} and {@code BookingStatus.CANCELLED}
+ * themselves were declared on Day 2 before anything set them: Day 16's
+ * booking-cancellation endpoint ({@code BookingController.cancel} →
+ * {@code BookingServiceImpl.cancel}) needs exactly this legal path to reach
+ * {@code CANCELLED} from either state a real booking could be cancelled
+ * from — and, per that plan, needed no schema or lifecycle change to get
+ * it. Every transition this table declares now has a caller.</p>
  *
  * <p>{@code FAILED} and {@code CANCELLED} are terminal: once a booking
  * lands there, nothing in this table lets it move again.</p>

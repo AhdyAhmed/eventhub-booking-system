@@ -145,7 +145,8 @@ class EventChainIT {
     @BeforeEach
     void setUp() {
         User user = userRepository.save(
-                User.builder().fullName("Chain Tester").email("chain-tester@example.com").build());
+                User.builder().fullName("Chain Tester").email("chain-tester@example.com")
+                        .passwordHash("test-password-hash").build());
         userId = user.getId();
         // Each test method shares one Spring context (and so one spy) -
         // clearing recorded invocations, not the spy's real behavior,
@@ -167,7 +168,7 @@ class EventChainIT {
     void fullChain_paymentSucceeds_confirmsBookingBooksSeatAndNotifies() {
         Long seatId = seedSeat(new BigDecimal("50.00")); // comfortably under the 1000.00 mock decline threshold
 
-        BookingResponse created = bookingService.create(new BookingRequest(userId, List.of(seatId)));
+        BookingResponse created = bookingService.create(userId, new BookingRequest(List.of(seatId)));
         // The synchronous result is still PENDING - payment hasn't run yet,
         // it's mock-charged by a Kafka consumer reacting to the
         // AFTER_COMMIT publish this call triggers, not by this call itself.
@@ -191,7 +192,7 @@ class EventChainIT {
     void fullChain_paymentDeclines_failsBookingAndReleasesSeat() {
         Long seatId = seedSeat(new BigDecimal("5000.00")); // over the mock decline threshold
 
-        BookingResponse created = bookingService.create(new BookingRequest(userId, List.of(seatId)));
+        BookingResponse created = bookingService.create(userId, new BookingRequest(List.of(seatId)));
 
         await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
             Booking booking = bookingRepository.findById(created.id()).orElseThrow();
@@ -208,7 +209,7 @@ class EventChainIT {
                 .when(notificationListener).onBookingConfirmed(any());
 
         Long seatId = seedSeat(new BigDecimal("50.00"));
-        BookingResponse created = bookingService.create(new BookingRequest(userId, List.of(seatId)));
+        BookingResponse created = bookingService.create(userId, new BookingRequest(List.of(seatId)));
 
         try (Consumer<String, String> dltConsumer = dltConsumer()) {
             dltConsumer.subscribe(List.of(KafkaTopicConfig.BOOKING_CONFIRMED_DLT));

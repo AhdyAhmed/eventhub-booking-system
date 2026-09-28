@@ -91,14 +91,41 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        # Day 16: metrics added - the roadmap explicitly asks for
+        # health/info/metrics all exposed. "Exposed" here means "on the
+        # classpath and mapped to a URL," not "reachable by anyone" -
+        # SecurityConfig permits only /actuator/health/** (infrastructure
+        # probes have no way to carry a bearer token); /actuator/info and
+        # /actuator/metrics/** fall under that same config's
+        # anyRequest().authenticated() and need a valid token like any other
+        # protected endpoint. That's the "lock down, not wide open" half of
+        # this day's roadmap line.
+        include: health,info,metrics
   endpoint:
     health:
       show-details: when-authorized
       probes:
         enabled: true
 
+# Day 16: JWT signing config. The secret below is a local-dev-only
+# placeholder - long enough to satisfy HS256's 256-bit minimum (see
+# JwtProperties' own doc for what happens if it isn't), but it is
+# committed to source control, which a real signing secret never should
+# be. Any non-local deployment MUST override this via the JWT_SECRET
+# env var; this default exists so `docker compose up` keeps working
+# out of the box for local development, not as a suggestion for anything
+# beyond that.
+security:
+  jwt:
+    secret: ${JWT_SECRET:this-is-a-local-dev-only-placeholder-secret-replace-me-in-any-real-deployment}
+    expiration-ms: ${JWT_EXPIRATION_MS:3600000} # 1 hour
+
 logging:
   level:
     root: INFO
     com.ahdyahmed.eventhub: DEBUG
+    # Day 16: Spring Security's own filter-chain decisions (which rule
+    # matched, permit vs. deny) at DEBUG - invaluable the first time a
+    # request gets an unexpected 401/403 and the fix is seeing exactly
+    # which authorizeHttpRequests matcher it fell through to.
+    org.springframework.security: DEBUG
