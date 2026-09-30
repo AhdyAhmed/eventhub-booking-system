@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Day 17: log FORMAT lives here; log LEVELS stay in application.yml
+    (logging.level.*), which Spring Boot applies on top of this file.
+
+    Two modes, chosen by Spring profile:
+
+      (default)          one JSON object per line on stdout - what a
+                         container platform / log shipper expects, and what
+                         makes correlationId, bookingId, etc. queryable
+                         fields instead of text to regex over.
+      pretty             plain text with the correlation id in brackets - for
+                         reading logs in a terminal while developing.
+                         Activate with SPRING_PROFILES_ACTIVE=pretty.
+
+    Logging to stdout (not a file) is deliberate: it's the twelve-factor
+    approach and what Day 18's `docker compose logs` / any container runtime
+    picks up with no extra configuration. Rotation and shipping are the
+    platform's job, not the app's.
+
+    This file is named logback-spring.xml (not logback.xml) so Spring Boot
+    processes it - that's what makes <springProfile> and <springProperty>
+    available. A plain logback.xml is loaded before Spring's Environment
+    exists and can't use either.
+-->
+<configuration>
+
+    <springProperty scope="context" name="APP_NAME" source="spring.application.name"
+                    defaultValue="eventhub-booking-system"/>
+
+    <springProfile name="!pretty">
+        <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+            <!--
+                LogstashEncoder writes, per event: @timestamp, message,
+                logger_name, thread_name, level, plus EVERY MDC entry
+                (correlationId, userId) and every StructuredArgument
+                (bookingId, event, ...) as top-level fields.
+            -->
+            <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+                <customFields>{"service":"${APP_NAME}"}</customFields>
+                <!--
+                    A full unfiltered stack trace can be hundreds of lines,
+                    all inside one JSON string. Capping depth and printing
+                    the root cause first keeps the part you actually read
+                    (the cause) at the top of a line that's still one event.
+                -->
+                <throwableConverter class="net.logstash.logback.stacktrace.ShortenedThrowableConverter">
+                    <maxDepthPerThrowable>30</maxDepthPerThrowable>
+                    <rootCauseFirst>true</rootCauseFirst>
+                </throwableConverter>
+            </encoder>
+        </appender>
+    </springProfile>
+
+    <springProfile name="pretty">
+        <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder>
+                <!-- %X{key:-default}: the MDC value, or the default when unset -->
+                <pattern>%d{HH:mm:ss.SSS} %-5level [%X{correlationId:-no-req}] [user=%X{userId:--}] %logger{30} - %msg%n</pattern>
+            </encoder>
+        </appender>
+    </springProfile>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+
+</configuration>

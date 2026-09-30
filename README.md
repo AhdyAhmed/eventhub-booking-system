@@ -2,7 +2,7 @@
 
 A production-grade event/ticket booking system demonstrating optimistic locking under concurrency, Redis caching, and event-driven order processing in Spring Boot. This is Project 3 of a 3-project backend portfolio (Core REST API → Auth & Authorization → **Production-grade Booking/Order System**).
 
-**Status:** 🚧 Day 16 — JWT auth is wired in: registration, login, and every booking endpoint restricted to its owner. Actuator now exposes metrics too, locked behind the same token. Production hardening (logging, Docker, CI) lands over the following days (see [Roadmap](#roadmap) below).
+**Status:** 🚧 Day 17 — structured JSON logging with a correlation ID that follows a request from the HTTP call through both Kafka hops, plus lifecycle events (booking created, payment processed, notification sent) you can query by field. Docker, CI, and load testing land over the following days (see [Roadmap](#roadmap) below).
 
 ---
 
@@ -17,6 +17,7 @@ A production-grade event/ticket booking system demonstrating optimistic locking 
 | Caching                | Redis (cache-aside, from Day 8)            |
 | Messaging               | Apache Kafka (KRaft mode, from Day 11)     |
 | Auth                     | Spring Security + stateless JWT (HS256, jjwt), from Day 16 |
+| Logging                   | SLF4J/Logback, JSON via `logstash-logback-encoder`, MDC correlation IDs (from Day 17) |
 | Testing                  | JUnit 5, Mockito, Testcontainers (Postgres, Kafka), Awaitility |
 | Build                     | Maven                                       |
 | Containerization           | Docker / Docker Compose                     |
@@ -43,6 +44,12 @@ A production-grade event/ticket booking system demonstrating optimistic locking 
    curl http://localhost:8080/actuator/health
    ```
    Expected: `{"status":"UP"}`
+
+Logs are one JSON object per line by default (see [What Day 17 adds](#what-day-17-adds)). For readable plain-text output while developing:
+
+```bash
+SPRING_PROFILES_ACTIVE=pretty mvn spring-boot:run
+```
 
 ## Running the tests
 
@@ -79,6 +86,7 @@ All datasource settings are overridable via environment variables, with sane loc
 | `SERVER_PORT`             | `8080`                    |                                            |
 | `JWT_SECRET`                | a local-dev placeholder      | **Must** be overridden in any real deployment — the default is committed to source control. Needs 32+ bytes for HS256 |
 | `JWT_EXPIRATION_MS`           | `3600000` (1 hour)             | Token lifetime                              |
+| `SPRING_PROFILES_ACTIVE`        | *(unset)*                        | Unset = JSON logs. `pretty` = plain-text, human-readable console logs (Day 17) |
 
 ## API reference
 
@@ -106,6 +114,8 @@ All datasource settings are overridable via environment variables, with sane loc
 "No" means the endpoint is reachable without a token (public browsing, or the two endpoints whose whole job is to hand one out); everything marked "Yes" needs `Authorization: Bearer <token>` from `/api/v1/auth/login` or `/api/v1/auth/register`, or a `401` comes back instead. See [What Day 16 adds](#what-day-16-adds) for the full picture and [SecurityConfig](#project-structure)'s own reasoning for exactly where that line sits.
 
 Every `POST`/`PUT` body is validated (`@Valid`); every error response — validation failure, not-found, conflict, unauthorized, forbidden, or unexpected — comes back in the one shape `ErrorResponse` defines. See [Usage examples](#usage-examples) for what each looks like.
+
+**Correlation IDs (Day 17):** every response — success or error — carries an `X-Correlation-Id` header, and every error body repeats it as `correlationId`. Send your own `X-Correlation-Id` (letters, digits, `.`, `_`, `-`, up to 64 characters) and it's reused; anything else is replaced with a generated UUID. It's the string to quote when reporting a problem, and the one to search the logs for.
 
 **A note on the examples below:** sections through Day 15 predate authentication — their `curl` commands post a `userId` field with no `Authorization` header and won't run as-is against this version. The [What Day 16 adds](#what-day-16-adds) section has the current, runnable register → login → book → cancel flow.
 
@@ -168,6 +178,7 @@ curl -i -X POST http://localhost:8080/api/v1/events \
   "error": "Bad Request",
   "message": "Validation failed",
   "path": "/api/v1/events",
+  "correlationId": "5b0c7e1e-3f0a-4c1d-9a55-2f7d7f1f6a11",
   "fieldErrors": {
     "name": "name is required",
     "category": "must be one of: CONCERT, SPORTS, THEATER, CONFERENCE, EXHIBITION, OTHER",
@@ -185,6 +196,7 @@ curl -i -X POST http://localhost:8080/api/v1/events \
   "error": "Not Found",
   "message": "Event not found with id 999",
   "path": "/api/v1/events/999",
+  "correlationId": "0d4a5d2e-7c1b-4b8e-8e0f-9a3b6c2d1e77",
   "fieldErrors": null
 }
 ```
@@ -358,6 +370,14 @@ src/main/java/com/ahdyahmed/eventhub/
 │   ├── BaseEntity.java             # shared id + audit columns, JPA-safe equals/hashCode
 │   ├── dto/
 │   │   └── PageResponse.java       # framework-agnostic pagination wrapper
+│   ├── logging/                    # Day 17
+│   │   ├── CorrelationId.java                  # header name + validate-or-generate rules
+│   │   ├── MdcKeys.java                        # correlationId / userId MDC key names
+│   │   ├── LogEvents.java                      # stable "event" names for lifecycle log lines
+│   │   ├── CorrelationIdFilter.java            # assigns/echoes/clears the id, ahead of Spring Security
+│   │   ├── RequestLoggingFilter.java           # one access-log line per request
+│   │   ├── CorrelationIdProducerInterceptor.java  # MDC -> Kafka record header
+│   │   └── CorrelationIdRecordInterceptor.java    # Kafka record header -> MDC
 │   ├── exception/
 │   │   ├── ResourceNotFoundException.java
 │   │   ├── SeatUnavailableException.java   # 409 - business-state or optimistic-lock conflict
@@ -466,6 +486,7 @@ src/main/java/com/ahdyahmed/eventhub/
 
 src/main/resources/
 ├── application.yml
+├── logback-spring.xml                    # Day 17 - JSON console logs (default) / plain text (`pretty` profile)
 └── db/migration/
     ├── V1__baseline.sql
     ├── V2__domain_schema.sql             # users, venues, events, seats, bookings, booking_items
@@ -490,7 +511,15 @@ src/test/java/com/ahdyahmed/eventhub/
     └── PaymentConsumerTest.java         # Day 14 - charge result -> published event mapping
 auth/
 ├── JwtServiceTest.java             # Day 16 - round trip, wrong user, expiry, wrong secret
-└── AuthServiceImplTest.java        # Day 16 - register hashes the password; login/duplicate errors propagate
+├── AuthServiceImplTest.java        # Day 16 - register hashes the password; login/duplicate errors propagate
+└── JwtAuthenticationFilterTest.java # Day 17 - userId reaches the MDC for a valid token, never for a bad one
+common/
+├── exception/
+│   └── ErrorResponseTest.java      # Day 17 - correlationId picked up from the MDC
+└── logging/
+    ├── CorrelationIdFilterTest.java            # Day 17 - generate/echo/reject-hostile/always-clear
+    ├── RequestLoggingFilterTest.java           # Day 17 - levels, no query string, exception path
+    └── CorrelationIdKafkaInterceptorsTest.java # Day 17 - producer stamp, consumer restore, never overwrite
 integration/
 └── EventChainIT.java   # Day 15 - the full booking -> payment event -> notification event chain,
                          # plus a forced-failure retry-then-dead-letter test, against real Postgres + Kafka
@@ -623,6 +652,73 @@ curl -i http://localhost:8080/actuator/health                          # 200 - p
 # register a second user, then GET the first user's booking with their token -> 403
 ```
 
+## What Day 17 adds
+
+The roadmap's own words: "JSON structured logs (Logback encoder), correlation/request ID per request (filter + MDC). Log key lifecycle events: booking created, payment processed, notification sent." The interesting part is the second sentence's hidden requirement: those three lifecycle events don't happen on the same thread — a booking is created on an HTTP request thread, but payment and notification happen later on Kafka consumer threads that never saw the request. A correlation id that stops at the HTTP boundary would make the lifecycle logs useless for the one question they exist to answer ("what happened to *this* booking?"), so the id is carried across Kafka too.
+
+- **JSON logs by default** — `logstash-logback-encoder` + `logback-spring.xml`: one JSON object per line on stdout, with every MDC entry (`correlationId`, `userId`) and every structured argument (`bookingId`, `event`, …) as its own top-level field. Set `SPRING_PROFILES_ACTIVE=pretty` for plain, human-readable console output while developing.
+- **`CorrelationIdFilter`** (`common/logging`) — assigns each request an id (or accepts a safe caller-supplied `X-Correlation-Id`), puts it in the MDC, echoes it back in the response header, and clears it in a `finally`. It runs *ahead of* Spring Security, so even a `401` from a missing token has an id.
+- **`ErrorResponse` now carries `correlationId`** — the same id, in the error body, so a client that only shows the error JSON still hands you the one string that finds the request in the logs.
+- **`RequestLoggingFilter`** — one `http.request.completed` line per request: method, path, status, duration. No query string, no bodies (they carry tokens and passwords). Health probes at `DEBUG`, 5xx at `WARN`.
+- **`userId` in the MDC** — `JwtAuthenticationFilter` adds it once a token is validated, so every line an authenticated request writes says who it was for.
+- **The id crosses Kafka** — `CorrelationIdProducerInterceptor` (registered in `application.yml`) stamps the current MDC id onto every outgoing record as a header; `CorrelationIdRecordInterceptor` (attached to both listener container factories) restores it into the MDC before a listener runs. HTTP request → `booking-confirmed-events` → payment consumer → `payment-processed-events` → booking listener all log under one id.
+- **Lifecycle events**, each with a stable `event` field to query on:
+
+  | `event` | Logged by | Thread |
+  |---|---|---|
+  | `booking.created` | `BookingConfirmedEventPublisher` (after the transaction commits) | HTTP |
+  | `payment.processed` | `PaymentConsumer` | Kafka consumer |
+  | `notification.sent` | `NotificationListener` | Kafka consumer |
+  | `booking.status_changed` | `PaymentProcessedListener` (payment result) and `BookingServiceImpl.cancel` | Kafka consumer / HTTP |
+  | `http.request.completed` | `RequestLoggingFilter` | HTTP |
+
+- **Tests** — unit tests for both filters, both Kafka interceptors, `ErrorResponse`, and the MDC behavior of `JwtAuthenticationFilter` (all Docker-free); `BookingConcurrencyIT` gained real-HTTP checks (distinct ids across ten concurrent requests; a caller-supplied id echoed on an unauthenticated `401`); `EventChainIT` gained `correlationId_survivesEveryKafkaHopOfTheChain`, which reads the id off a record on the *second* topic — it can only be there if every earlier link worked.
+
+**Try it** (with the stack up and the app running; illustrative output — exact field order may differ):
+
+```bash
+# 1. Pick your own correlation id and watch it come back - header AND error body
+curl -i -H "X-Correlation-Id: demo-123" http://localhost:8080/api/v1/events/999
+# X-Correlation-Id: demo-123
+# {"timestamp":"...","status":404,...,"path":"/api/v1/events/999","correlationId":"demo-123","fieldErrors":null}
+
+# 2. Book a seat under a known id (TOKEN from the Day 16 register flow)
+curl -X POST http://localhost:8080/api/v1/bookings -H "Authorization: Bearer $TOKEN" \
+  -H "X-Correlation-Id: demo-booking-1" -H "Content-Type: application/json" -d '{"seatIds":[7]}'
+
+# 3. In the terminal running the app, everything that booking caused - across
+#    the HTTP thread AND the Kafka consumer threads - shares that one id:
+#    ... | grep '"correlationId":"demo-booking-1"'
+```
+
+Filtering the JSON stream for `demo-booking-1` should show, in roughly this order: `booking.created`, `http.request.completed`, `payment.processed`, `notification.sent`, `booking.status_changed` (`PENDING -> CONFIRMED`). One line, trimmed and pretty-printed for reading:
+
+```json
+{
+  "@timestamp": "2026-09-30T10:15:02.114Z",
+  "level": "INFO",
+  "logger_name": "com.ahdyahmed.eventhub.payment.PaymentConsumer",
+  "thread_name": "org.springframework.kafka.KafkaListenerEndpointContainer#1-0-C-1",
+  "message": "Payment SUCCEEDED for booking 12",
+  "service": "eventhub-booking-system",
+  "correlationId": "demo-booking-1",
+  "event": "payment.processed",
+  "paymentStatus": "SUCCEEDED",
+  "bookingId": 12,
+  "eventId": 1,
+  "amount": 50.00,
+  "reason": null
+}
+```
+
+Want it readable in a terminal instead? `SPRING_PROFILES_ACTIVE=pretty mvn spring-boot:run` prints, e.g. `10:15:02.114 INFO  [demo-booking-1] [user=-] c.a.e.payment.PaymentConsumer - Payment SUCCEEDED for booking 12`.
+
+**Known limits, named rather than hidden:**
+
+- The id lives in a thread-local, so it doesn't follow work handed to another thread pool (`@Async`, `CompletableFuture.supplyAsync`). This project doesn't do that today; the moment it does, that hand-off needs to copy the MDC explicitly.
+- The two "failed to publish" error lines in `BookingConfirmedEventPublisher` and `PaymentConsumer` run in a Kafka producer callback thread, so they carry `bookingId` in the message but not the `correlationId`. Join on `bookingId` (the `booking.created` line has both).
+- This is correlation, not distributed tracing: you can find everything one request caused, but there are no parent/child spans or per-hop timings. Micrometer Tracing / OpenTelemetry is the upgrade path if that's ever needed.
+
 ## Roadmap
 
 **Week 1 — Foundation & domain**
@@ -648,7 +744,7 @@ curl -i http://localhost:8080/actuator/health                          # 200 - p
 
 **Week 4 — Production readiness**
 - [x] Day 16 — JWT auth + booking ownership checks, Actuator hardening
-- [ ] Day 17 — structured JSON logging with correlation IDs
+- [x] Day 17 — structured JSON logging with correlation IDs
 - [ ] Day 18 — multi-stage Dockerfile + full docker-compose stack (app + Postgres + Redis + Kafka)
 - [ ] Day 19 — GitHub Actions CI (test + build on push)
 - [ ] Day 20 — GitHub Actions CD (build & push image)
@@ -734,3 +830,16 @@ curl -i http://localhost:8080/actuator/health                          # 200 - p
 - **Cancelling races the payment listener, and that is a known, accepted gap** — `Booking` has no `@Version`, unlike `Seat`, so `cancel` and `PaymentProcessedListener` updating the same booking at the same instant is a possible lost update (last commit wins). Day 16 is about authentication and ownership; the gap is documented at the method rather than papered over with an untested fix.
 - **`POST .../cancel`, not `DELETE`** — cancelling transitions the booking's status and keeps the row queryable; `DELETE` implies the resource disappears.
 - **`JwtAuthenticationEntryPoint` exists because `@RestControllerAdvice` structurally cannot reach filter-chain rejections** — but no custom `AccessDeniedHandler` was added: this project has no role-based rules, and its only `403` (ownership) is thrown from service code, which the controller advice already handles.
+- **JSON logs by default, plain text behind a `pretty` profile — not the other way around** — the default has to be what production consumes (a log shipper parses one JSON object per line, and `correlationId`/`bookingId` become filterable fields instead of text to regex); readability in a terminal is a developer convenience, so it's the opt-in. Logging to stdout rather than a file is the twelve-factor approach and means Day 18's `docker compose logs` works with zero extra configuration.
+- **`logstash-logback-encoder`, not Spring Boot's built-in structured logging** — that feature (`logging.structured.format.console`) only exists from Spring Boot 3.4; this project is on 3.3.4, and the roadmap names the Logback-encoder route anyway. The library isn't managed by Boot's dependency BOM, so its version is pinned in `pom.xml` (8.x is the line built against Logback 1.5, which Boot 3.3 ships). Upgrading Boot later would let this dependency go away.
+- **The correlation filter runs ahead of Spring Security, and a test proves it on a real `401`** — a request rejected by the security filter chain never reaches Spring MVC, so a correlation id assigned anywhere *after* security would leave exactly the requests you most need to debug — the rejected ones — with no id. `BookingConcurrencyIT` sends an unauthenticated request and asserts the caller's id comes back, which can only pass if the filter's position is right.
+- **An inbound `X-Correlation-Id` is validated, not trusted** — accepting a caller's id is useful (a gateway can stamp one id across services), but it's copied into every log line and back into a response header. An unchecked value is a log-injection and header-injection vector, and an unbounded one bloats every line the request writes. Anything outside `[A-Za-z0-9._-]{1,64}` is discarded for a generated UUID; the request is still served.
+- **The id is propagated over Kafka with interceptors, not a header added at each `send()` call site** — a `ProducerInterceptor` registered once in `application.yml` covers every send the app's producer makes, including ones no application code makes directly (Spring Kafka's dead-letter republish) and ones that don't exist yet. A call-site approach has to be remembered at every new `send`, and the first one someone forgets silently breaks the chain. It never overwrites an existing header, so a dead-lettered record keeps its *original* request's id.
+- **The consumer-side interceptor is attached to both container factories explicitly** — the replaced default factory (`KafkaErrorHandlingConfig`) and the hand-built `PaymentEventsConsumerConfig` factory. A hand-built factory gets none of what Spring Boot's configurer applies to the default one, so forgetting the second would have silently dropped the id at the very last hop of the chain — the same trap Day 15 documented for the error handler. `EventChainIT` reads the id off a record on the second topic precisely to catch this.
+- **The consumer interceptor overwrites the MDC on every record and also clears it after** — Kafka listener threads process record after record, and an id must never leak from one message to the next. Doing both (rather than trusting one of them) means a skipped cleanup on some failure path still can't hand a stale id to the next record. A record with no usable header gets a freshly generated id rather than an empty MDC, so its own log lines still correlate with *each other*.
+- **Structured arguments (`kv`/`value`) rather than string-formatting the fields into the message** — `log.info("Booking {} created", value("bookingId", id), ..., kv("event", "booking.created"))` produces both a readable sentence and real fields. The `event` name is a stable constant (`LogEvents`) precisely because the message text is free to be reworded later while dashboards and alert rules keep working. A rule that comes with it: never use an MDC key (`userId`, `correlationId`) as an argument name — both become top-level JSON fields, and the result would be a duplicate key.
+- **`booking.created` is logged after commit, in the Kafka publisher, not inside `BookingServiceImpl.create`** — logging "Booking created" from inside the `@Transactional` method would announce a booking that could still roll back. `BookingConfirmedEventPublisher` only runs at all if the transaction committed (Day 12's whole point), and it still runs on the request thread, so the line carries the request's `correlationId` and `userId` anyway.
+- **The access log records the path, not the query string, and never a body** — query strings are where tokens, emails, and search terms end up; `/auth/login` and `/auth/register` bodies carry passwords and bearer tokens. Logs are routinely shipped somewhere less protected than the database, so what's never written can never leak from there. Health probes drop to `DEBUG` (an orchestrator polling every few seconds would otherwise be most of the log volume), and a 5xx is `WARN`, not `ERROR` — the real error with its stack trace was already logged where it happened, and this line is the request-level summary that shouldn't double-count the incident.
+- **`userId` is put in the MDC by `JwtAuthenticationFilter` but cleared by `CorrelationIdFilter`** — the access-log line is written *after* the security filter has returned, and needs the id still present. Making the outermost filter the single owner of request-scoped MDC cleanup keeps that ordering dependency in one documented place and prevents thread reuse from ever attributing one request's user to the next.
+- **The Spring banner is switched off** — with stdout now a stream of JSON events parsed line by line, the ASCII banner is the one thing Boot prints that isn't a log event, i.e. a guaranteed unparseable line at the top of every startup.
+- **Correlation IDs, not distributed tracing** — the roadmap asks for a request id via filter + MDC, and that answers "everything this one request caused, across threads and Kafka hops." It doesn't give parent/child spans or per-hop timings; Micrometer Tracing / OpenTelemetry is the upgrade path if that's ever needed. The thread-local approach also doesn't follow work handed to another thread pool — nothing here does that today, and it's named in the Day 17 section as a limit rather than left to be discovered.

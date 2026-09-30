@@ -1,0 +1,41 @@
+# ---- Build output ----
+target/
+!.mvn/wrapper/maven-wrapper.jar
+
+# ---- IDEs / editors ----
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+.classpath
+.project
+.settings/
+.factorypath
+.apt_generated/
+.springBeans
+.sts4-cache/
+nbproject/
+*.swp
+*~
+
+# ---- OS junk ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Logs ----
+*.log
+logs/
+
+# ---- Local secrets / environment overrides (never commit real values) ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ---- Misc ----
+*.class
+hs_err_pid*
+replay_pid*

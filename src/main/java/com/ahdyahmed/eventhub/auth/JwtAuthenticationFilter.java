@@ -1,5 +1,6 @@
 package com.ahdyahmed.eventhub.auth;
 
+import com.ahdyahmed.eventhub.common.logging.MdcKeys;
 import io.jsonwebtoken.JwtException;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -8,6 +9,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
 import org.springframework.http.HttpHeaders;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -63,6 +65,15 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                             new UsernamePasswordAuthenticationToken(userDetails, null, userDetails.getAuthorities());
                     authToken.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
                     SecurityContextHolder.getContext().setAuthentication(authToken);
+                    // Day 17: from here on, every log line this request
+                    // writes carries userId. Deliberately not cleared in a
+                    // finally here - CorrelationIdFilter (the outermost
+                    // owner of request-scoped MDC state) removes it, so
+                    // RequestLoggingFilter's access-log line, written after
+                    // this filter has returned, still has it.
+                    if (userDetails instanceof UserPrincipal principal) {
+                        MDC.put(MdcKeys.USER_ID, String.valueOf(principal.getId()));
+                    }
                 }
             }
         } catch (JwtException | UsernameNotFoundException ex) {

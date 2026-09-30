@@ -1,5 +1,9 @@
 package com.ahdyahmed.eventhub.booking;
 
+import static com.ahdyahmed.eventhub.common.logging.LogEvents.BOOKING_STATUS_CHANGED;
+import static net.logstash.logback.argument.StructuredArguments.kv;
+import static net.logstash.logback.argument.StructuredArguments.value;
+
 import com.ahdyahmed.eventhub.booking.event.BookingConfirmedEvent;
 import com.ahdyahmed.eventhub.common.exception.BookingValidationException;
 import com.ahdyahmed.eventhub.common.exception.ResourceNotFoundException;
@@ -17,6 +21,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.security.access.AccessDeniedException;
@@ -52,9 +57,16 @@ import org.springframework.transaction.annotation.Transactional;
  * "you don't own this resource" is exactly what that exception already
  * means, and reusing it means one line in {@code GlobalExceptionHandler}
  * covers both this and any future ownership check the same way.</p>
+ *
+ * <p>Day 17: {@code cancel} logs the {@code booking.status_changed}
+ * lifecycle event. {@code create} deliberately does <em>not</em> log
+ * {@code booking.created} itself — that line lives in {@code
+ * BookingConfirmedEventPublisher}, which only runs after the transaction has
+ * actually committed (see its class doc for why that ordering matters).</p>
  */
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class BookingServiceImpl implements BookingService {
 
     private final BookingRepository bookingRepository;
@@ -148,6 +160,7 @@ public class BookingServiceImpl implements BookingService {
                 .orElseThrow(() -> new ResourceNotFoundException("Booking not found with id " + id));
         requireOwnership(booking, requestingUserId);
 
+        BookingStatus previous = booking.getStatus();
         bookingStateMachine.transition(booking, BookingStatus.CANCELLED);
 
         Long eventId = booking.getItems().get(0).getSeat().getEvent().getId();
@@ -155,6 +168,15 @@ public class BookingServiceImpl implements BookingService {
         seatAvailabilityCacheEvictor.evict(eventId);
 
         Booking saved = bookingRepository.save(booking);
+        // No explicit userId field: this runs on the HTTP request thread, so
+        // the request's userId MDC entry is already on the line (an explicit
+        // one would duplicate that key in the JSON).
+        log.info("Booking {} status changed {} -> {}",
+                value("bookingId", saved.getId()),
+                value("fromStatus", previous),
+                value("toStatus", BookingStatus.CANCELLED),
+                kv("eventId", eventId),
+                kv("event", BOOKING_STATUS_CHANGED));
         return bookingMapper.toResponse(saved);
     }
 

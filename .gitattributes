@@ -1,0 +1,18 @@
+# Normalize line endings: store LF in the repo, let each OS check out its own
+# native endings for text files. Prevents whole-file diffs when the project
+# is edited on Windows and on Linux/macOS/CI.
+* text=auto
+
+# Scripts that must run on Linux (containers, CI) keep LF even on Windows checkouts.
+*.sh text eol=lf
+mvnw text eol=lf
+Dockerfile text eol=lf
+
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Binary
+*.jar binary
+*.png binary
+*.jpg binary
+*.zip binary

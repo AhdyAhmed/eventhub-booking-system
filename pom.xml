@@ -78,6 +78,27 @@
             <scope>runtime</scope>
         </dependency>
 
+        <!--
+            Structured logging (Day 17): a Logback encoder that writes each
+            log event as one JSON object per line, and - via its
+            StructuredArguments API - turns log.info("...", kv("bookingId", 5))
+            into a real queryable "bookingId": 5 field instead of text to
+            regex over.
+
+            Why this library rather than Spring Boot's own structured
+            logging: that feature (logging.structured.format.console) only
+            exists from Spring Boot 3.4; this project is on 3.3.4, so the
+            standard Logback-encoder route the roadmap names is the right
+            tool here. Not managed by Boot's dependency BOM, hence the
+            explicit version. 8.x is the line built against Logback 1.5,
+            which is what Boot 3.3 ships.
+        -->
+        <dependency>
+            <groupId>net.logstash.logback</groupId>
+            <artifactId>logstash-logback-encoder</artifactId>
+            <version>8.0</version>
+        </dependency>
+
         <!-- Caching (Day 8): cache abstraction + Redis as the backing store -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

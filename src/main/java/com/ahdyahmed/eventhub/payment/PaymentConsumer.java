@@ -1,5 +1,9 @@
 package com.ahdyahmed.eventhub.payment;
 
+import static com.ahdyahmed.eventhub.common.logging.LogEvents.PAYMENT_PROCESSED;
+import static net.logstash.logback.argument.StructuredArguments.kv;
+import static net.logstash.logback.argument.StructuredArguments.value;
+
 import com.ahdyahmed.eventhub.booking.event.BookingConfirmedEvent;
 import com.ahdyahmed.eventhub.config.KafkaTopicConfig;
 import com.ahdyahmed.eventhub.payment.event.PaymentProcessedEvent;
@@ -28,6 +32,16 @@ import org.springframework.stereotype.Component;
  * KafkaTemplate} rather than through another {@code
  * @TransactionalEventListener} indirection is the right amount of
  * machinery, not a shortcut.</p>
+ *
+ * <p><strong>Day 17:</strong> this is where the {@code payment.processed}
+ * lifecycle line is logged — one line per booking, carrying the outcome
+ * ({@code paymentStatus}) and, for a decline, the {@code reason}. The
+ * {@code correlationId} on it was restored from the incoming Kafka record's
+ * header by {@code CorrelationIdRecordInterceptor}, and the {@code
+ * KafkaTemplate.send} below re-stamps it onto the outgoing {@link
+ * PaymentProcessedEvent} record — that's the second hop of the chain.
+ * {@code MockPaymentServiceImpl}'s own per-charge lines were dropped to
+ * {@code DEBUG} so an outcome isn't reported twice at {@code INFO}.</p>
  */
 @Component
 @RequiredArgsConstructor
@@ -40,6 +54,14 @@ public class PaymentConsumer {
     @KafkaListener(topics = KafkaTopicConfig.BOOKING_CONFIRMED_TOPIC, groupId = "payment-service")
     public void onBookingConfirmed(BookingConfirmedEvent event) {
         PaymentResult result = paymentService.charge(event);
+
+        log.info("Payment {} for booking {}",
+                value("paymentStatus", result.status()),
+                value("bookingId", event.bookingId()),
+                kv("eventId", event.eventId()),
+                kv("amount", event.totalAmount()),
+                kv("reason", result.reason()),
+                kv("event", PAYMENT_PROCESSED));
 
         PaymentProcessedEvent processed = new PaymentProcessedEvent(
                 event.bookingId(), event.eventId(), event.seatIds(), event.totalAmount(),

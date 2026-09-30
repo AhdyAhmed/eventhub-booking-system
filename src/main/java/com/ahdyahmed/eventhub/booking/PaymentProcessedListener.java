@@ -1,5 +1,9 @@
 package com.ahdyahmed.eventhub.booking;
 
+import static com.ahdyahmed.eventhub.common.logging.LogEvents.BOOKING_STATUS_CHANGED;
+import static net.logstash.logback.argument.StructuredArguments.kv;
+import static net.logstash.logback.argument.StructuredArguments.value;
+
 import com.ahdyahmed.eventhub.common.exception.ResourceNotFoundException;
 import com.ahdyahmed.eventhub.config.KafkaTopicConfig;
 import com.ahdyahmed.eventhub.payment.PaymentStatus;
@@ -47,6 +51,14 @@ import org.springframework.transaction.annotation.Transactional;
  * pointless — so either one goes straight to {@code
  * payment-processed-events.DLT} without the exponential-backoff delay a
  * genuinely transient failure gets first.</p>
+ *
+ * <p><strong>Day 17:</strong> the two outcome lines below are one {@code
+ * booking.status_changed} event now ({@code fromStatus}, {@code toStatus},
+ * and a {@code reason} for a decline) instead of two differently-worded
+ * strings — "which bookings ended up FAILED, and why" becomes a field query
+ * rather than a regex over message text. This is the last hop of the chain:
+ * its {@code correlationId} is the HTTP request's, carried through both Kafka
+ * topics.</p>
  */
 @Component
 @RequiredArgsConstructor
@@ -88,10 +100,12 @@ public class PaymentProcessedListener {
 
         bookingRepository.save(booking);
 
-        if (target == BookingStatus.FAILED) {
-            log.info("Booking {} FAILED ({}) - seats released back to AVAILABLE", booking.getId(), event.reason());
-        } else {
-            log.info("Booking {} CONFIRMED - seats finalized as BOOKED", booking.getId());
-        }
+        log.info("Booking {} status changed {} -> {}",
+                value("bookingId", booking.getId()),
+                value("fromStatus", previous),
+                value("toStatus", target),
+                kv("eventId", event.eventId()),
+                kv("reason", event.reason()),
+                kv("event", BOOKING_STATUS_CHANGED));
     }
 }

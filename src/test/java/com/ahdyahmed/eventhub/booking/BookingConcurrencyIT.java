@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.ahdyahmed.eventhub.auth.JwtService;
 import com.ahdyahmed.eventhub.auth.UserPrincipal;
+import com.ahdyahmed.eventhub.common.logging.CorrelationId;
 import com.ahdyahmed.eventhub.event.Event;
 import com.ahdyahmed.eventhub.event.EventRepository;
 import com.ahdyahmed.eventhub.seat.Seat;
@@ -33,6 +34,7 @@ import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -73,6 +75,12 @@ import org.testcontainers.containers.PostgreSQLContainer;
  * sign a token for the seeded test user — the concurrency behavior under
  * test starts the instant the request reaches {@code BookingController},
  * so how the token was obtained isn't part of what this test is proving.</p>
+ *
+ * <p>Day 17: this class doubles as the real-HTTP check for correlation ids,
+ * for the same reason it's the right place for the concurrency claim — it's
+ * the one test that runs a live embedded server, with the real servlet
+ * filter chain in front of it. A {@code MockMvc} test would skip exactly the
+ * part (filter ordering relative to Spring Security) that matters.</p>
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class BookingConcurrencyIT {
@@ -165,6 +173,7 @@ class BookingConcurrencyIT {
         CountDownLatch startLatch = new CountDownLatch(1);
         CountDownLatch doneLatch = new CountDownLatch(CONCURRENT_ATTEMPTS);
         List<HttpStatusCode> results = Collections.synchronizedList(new ArrayList<>());
+        List<String> correlationIds = Collections.synchronizedList(new ArrayList<>());
 
         String url = "http://localhost:" + port + "/api/v1/bookings";
         HttpHeaders headers = new HttpHeaders();
@@ -180,6 +189,7 @@ class BookingConcurrencyIT {
                     startLatch.await();
                     ResponseEntity<String> response = restTemplate.postForEntity(url, request, String.class);
                     results.add(response.getStatusCode());
+                    correlationIds.add(response.getHeaders().getFirst(CorrelationId.HEADER));
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 } finally {
@@ -206,6 +216,16 @@ class BookingConcurrencyIT {
                 .as("every losing attempt should come back as 409, not a 500 or a hang")
                 .isEqualTo(CONCURRENT_ATTEMPTS - 1);
 
+        // Day 17: every one of the ten simultaneous requests - winner and
+        // losers alike, 2xx and 409 alike - came back with its own
+        // correlation id. Distinct ids under real concurrency is what a
+        // shared/leaked id would break.
+        assertThat(correlationIds)
+                .as("one distinct correlation id per concurrent request")
+                .hasSize(CONCURRENT_ATTEMPTS)
+                .doesNotContainNull()
+                .doesNotHaveDuplicates();
+
         Seat reloaded = seatRepository.findById(contestedSeatId).orElseThrow();
         assertThat(reloaded.getStatus()).isEqualTo(SeatStatus.RESERVED);
         // Exactly one successful UPDATE happened: version moved from 0 to 1,
@@ -215,5 +235,34 @@ class BookingConcurrencyIT {
         assertThat(reloaded.getVersion()).isEqualTo(1L);
     }
 
-}
+    @Test
+    void callerSuppliedCorrelationId_isEchoedInTheHeaderAndInsideTheErrorBody_evenOnAnUnauthenticated401() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.set(CorrelationId.HEADER, "caller-supplied-123");
+        // No bearer token on purpose. A 401 is produced inside Spring
+        // Security's filter chain, before any controller or
+        // GlobalExceptionHandler - so getting the id back proves
+        // CorrelationIdFilter runs *ahead of* Spring Security, not merely
+        // somewhere in the MVC layer. (A rejected request is precisely the
+        // one you most need an id for.)
+        ResponseEntity<String> response = restTemplate.exchange(
+                "http://localhost:" + port + "/api/v1/bookings/1",
+                HttpMethod.GET, new HttpEntity<>(headers), String.class);
 
+        assertThat(response.getStatusCode().value()).isEqualTo(401);
+        assertThat(response.getHeaders().getFirst(CorrelationId.HEADER)).isEqualTo("caller-supplied-123");
+        assertThat(response.getBody()).contains("\"correlationId\":\"caller-supplied-123\"");
+    }
+
+    @Test
+    void requestWithoutACorrelationId_getsOneGeneratedForIt() {
+        ResponseEntity<String> response = restTemplate.exchange(
+                "http://localhost:" + port + "/api/v1/bookings/1",
+                HttpMethod.GET, new HttpEntity<>(new HttpHeaders()), String.class);
+
+        String generated = response.getHeaders().getFirst(CorrelationId.HEADER);
+        assertThat(generated).isNotBlank();
+        assertThat(response.getBody()).contains("\"correlationId\":\"" + generated + "\"");
+    }
+
+}

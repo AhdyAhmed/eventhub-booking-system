@@ -1,5 +1,9 @@
 package com.ahdyahmed.eventhub.notification;
 
+import static com.ahdyahmed.eventhub.common.logging.LogEvents.NOTIFICATION_SENT;
+import static net.logstash.logback.argument.StructuredArguments.kv;
+import static net.logstash.logback.argument.StructuredArguments.value;
+
 import com.ahdyahmed.eventhub.booking.event.BookingConfirmedEvent;
 import com.ahdyahmed.eventhub.config.KafkaTopicConfig;
 import lombok.extern.slf4j.Slf4j;
@@ -40,6 +44,17 @@ import org.springframework.stereotype.Component;
  * centralizing the policy on the container factory, rather than adding it
  * per listener, is that any {@code @KafkaListener} not naming an explicit
  * {@code containerFactory} (this one included) picks it up automatically.</p>
+ *
+ * <p><strong>Day 17:</strong> the mock email line is now also the
+ * {@code notification.sent} lifecycle event — structured fields ({@code
+ * bookingId}, {@code userId}, {@code channel}) alongside the readable
+ * message, and the {@code correlationId} of the originating HTTP request,
+ * restored from the Kafka record header by {@code
+ * CorrelationIdRecordInterceptor}. The recipient address appears in the
+ * message text only, not as its own field: it's this mock's stand-in for "the
+ * email that was sent," and a real implementation would log a recipient
+ * <em>id</em>, not a raw address, into a system whose logs are shipped
+ * elsewhere.</p>
  */
 @Component
 @Slf4j
@@ -52,8 +67,14 @@ public class NotificationListener {
         // call to an email provider; nothing about how the event got here
         // would need to change.
         log.info("Mock email -> {}: your booking {} for event {} ({} seat(s), total {}) is confirmed",
-                event.userEmail(), event.bookingId(), event.eventId(), event.seatIds().size(),
-                event.totalAmount());
+                event.userEmail(),
+                value("bookingId", event.bookingId()),
+                value("eventId", event.eventId()),
+                value("seatCount", event.seatIds().size()),
+                event.totalAmount(),
+                kv("userId", event.userId()),
+                kv("channel", "email"),
+                kv("event", NOTIFICATION_SENT));
     }
 
 }

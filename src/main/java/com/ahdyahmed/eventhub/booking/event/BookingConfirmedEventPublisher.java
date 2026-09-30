@@ -1,5 +1,9 @@
 package com.ahdyahmed.eventhub.booking.event;
 
+import static com.ahdyahmed.eventhub.common.logging.LogEvents.BOOKING_CREATED;
+import static net.logstash.logback.argument.StructuredArguments.kv;
+import static net.logstash.logback.argument.StructuredArguments.value;
+
 import com.ahdyahmed.eventhub.config.KafkaTopicConfig;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -42,6 +46,18 @@ import org.springframework.transaction.event.TransactionalEventListener;
  * the booking, with a separate poller publishing from that table, is what
  * closes that gap; it's real additional infrastructure for a failure
  * window this portfolio project accepts rather than builds around.</p>
+ *
+ * <p><strong>Day 17 — why the {@code booking.created} log line is written
+ * here and not in {@code BookingServiceImpl.create}:</strong> this method is
+ * the first point at which the booking is <em>durably</em> created — it only
+ * runs at all if the transaction committed. Logging "Booking created" from
+ * inside the {@code @Transactional} service method would announce a booking
+ * that could still roll back a line later. This callback still runs on the
+ * original HTTP request thread, so the request's {@code correlationId} and
+ * {@code userId} MDC entries are present on the line (which is why {@code
+ * userId} isn't repeated as an explicit field — it would duplicate the MDC
+ * key in the JSON), and the same MDC is what {@code
+ * CorrelationIdProducerInterceptor} reads to stamp the Kafka record below.</p>
  */
 @Component
 @RequiredArgsConstructor
@@ -52,6 +68,13 @@ public class BookingConfirmedEventPublisher {
 
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
     public void onBookingConfirmed(BookingConfirmedEvent event) {
+        log.info("Booking {} created ({} seat(s), total {})",
+                value("bookingId", event.bookingId()),
+                value("seatCount", event.seatIds().size()),
+                value("totalAmount", event.totalAmount()),
+                kv("eventId", event.eventId()),
+                kv("event", BOOKING_CREATED));
+
         // Keyed by bookingId so every message about one booking - this one,
         // and whatever payment/notification events later days add - lands
         // on the same partition, giving per-booking ordering for free.

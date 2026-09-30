@@ -2,6 +2,13 @@ spring:
   application:
     name: eventhub-booking-system
 
+  main:
+    # Day 17: stdout is now a stream of JSON log lines that a log shipper
+    # parses one line at a time. The ASCII banner is the one thing Spring
+    # Boot prints that isn't a log event, so it would be a non-JSON line at
+    # the top of every startup. Quoted: an unquoted `off` is a YAML boolean.
+    banner-mode: "off"
+
   datasource:
     url: jdbc:postgresql://localhost:${DB_PORT:5433}/${DB_NAME:eventhub_db}
     username: ${DB_USER:eventhub_user}
@@ -51,6 +58,12 @@ spring:
         # consumer inside this app can deserialize into a known event type
         # from the topic name alone, same as any other message contract.
         spring.json.add.type.headers: false
+        # Day 17: stamps the current correlation id (from the MDC) onto every
+        # outgoing record as an X-Correlation-Id header - the producer half
+        # of carrying one id across HTTP -> Kafka -> consumer hops. Set here,
+        # once, so it also covers sends no application code makes directly
+        # (the dead-letter republish). See CorrelationIdProducerInterceptor.
+        interceptor.classes: com.ahdyahmed.eventhub.common.logging.CorrelationIdProducerInterceptor
     consumer:
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
@@ -120,6 +133,10 @@ security:
     secret: ${JWT_SECRET:this-is-a-local-dev-only-placeholder-secret-replace-me-in-any-real-deployment}
     expiration-ms: ${JWT_EXPIRATION_MS:3600000} # 1 hour
 
+# Day 17: the log FORMAT (JSON by default, plain text under the `pretty`
+# profile) lives in logback-spring.xml; this block only sets levels. Run with
+# SPRING_PROFILES_ACTIVE=pretty for human-readable console output while
+# developing.
 logging:
   level:
     root: INFO

@@ -1,5 +1,6 @@
 package com.ahdyahmed.eventhub.config;
 
+import com.ahdyahmed.eventhub.common.logging.CorrelationIdRecordInterceptor;
 import com.ahdyahmed.eventhub.payment.event.PaymentProcessedEvent;
 import java.util.Map;
 import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
@@ -43,6 +44,13 @@ import org.springframework.kafka.support.serializer.JsonDeserializer;
  * one explicit line rather than something that happens automatically —
  * worth calling out so this factory doesn't quietly fall out of sync with
  * the default one's retry/DLT behavior the next time either changes.</p>
+ *
+ * <p><strong>Day 17:</strong> same story, one more line — the {@link
+ * CorrelationIdRecordInterceptor} is attached here explicitly too. A
+ * hand-built factory gets none of what Spring Boot's configurer applies to
+ * the default one, so leaving this out would silently drop the correlation
+ * id at the exact hop ({@code PaymentProcessedListener}) that ends the
+ * chain.</p>
  */
 @Configuration
 public class PaymentEventsConsumerConfig {
@@ -62,6 +70,7 @@ public class PaymentEventsConsumerConfig {
                 new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(paymentProcessedConsumerFactory);
         factory.setCommonErrorHandler(kafkaErrorHandler);
+        factory.setRecordInterceptor(new CorrelationIdRecordInterceptor<>());
         return factory;
     }
 }

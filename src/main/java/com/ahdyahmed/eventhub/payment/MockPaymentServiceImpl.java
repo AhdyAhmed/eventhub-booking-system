@@ -43,10 +43,13 @@ public class MockPaymentServiceImpl implements PaymentService {
         if (booking.totalAmount().compareTo(declineThreshold) > 0) {
             String reason = "amount %s exceeds mock authorization limit %s"
                     .formatted(booking.totalAmount(), declineThreshold);
-            log.info("Mock payment DECLINED for booking {}: {}", booking.bookingId(), reason);
+            // DEBUG since Day 17: PaymentConsumer logs the one INFO-level
+            // payment.processed line per booking; this is the detail
+            // underneath it, not a second announcement of the same outcome.
+            log.debug("Mock payment DECLINED for booking {}: {}", booking.bookingId(), reason);
             return PaymentResult.failure(reason);
         }
-        log.info("Mock payment charged {} for booking {}", booking.totalAmount(), booking.bookingId());
+        log.debug("Mock payment charged {} for booking {}", booking.totalAmount(), booking.bookingId());
         return PaymentResult.success();
     }
 }

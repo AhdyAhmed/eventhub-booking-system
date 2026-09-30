@@ -17,6 +17,8 @@ import com.ahdyahmed.eventhub.booking.BookingStatus;
 import com.ahdyahmed.eventhub.booking.dto.BookingRequest;
 import com.ahdyahmed.eventhub.booking.dto.BookingResponse;
 import com.ahdyahmed.eventhub.booking.event.BookingConfirmedEvent;
+import com.ahdyahmed.eventhub.common.logging.CorrelationId;
+import com.ahdyahmed.eventhub.common.logging.MdcKeys;
 import com.ahdyahmed.eventhub.config.KafkaTopicConfig;
 import com.ahdyahmed.eventhub.event.Event;
 import com.ahdyahmed.eventhub.event.EventRepository;
@@ -29,6 +31,7 @@ import com.ahdyahmed.eventhub.user.UserRepository;
 import com.ahdyahmed.eventhub.venue.Venue;
 import com.ahdyahmed.eventhub.venue.VenueRepository;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -37,10 +40,12 @@ import java.util.Map;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.common.header.Header;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.mock.mockito.SpyBean;
@@ -241,9 +246,65 @@ class EventChainIT {
         verify(notificationListener, atLeast(2)).onBookingConfirmed(any());
     }
 
+    /**
+     * Day 17: the correlation id assigned at the start of a request has to
+     * survive <em>both</em> Kafka hops - {@code booking-confirmed-events}
+     * (stamped by the producer interceptor, restored into the MDC by the
+     * record interceptor on {@code PaymentConsumer}'s thread) and then
+     * {@code payment-processed-events} (re-stamped from that restored MDC by
+     * the same producer interceptor). Reading the id off the record on the
+     * <em>second</em> topic proves the whole chain: it can only be there if
+     * every link before it worked.
+     *
+     * <p>This class enters the flow at {@code BookingService.create} rather
+     * than over HTTP (see the class doc), so there's no servlet filter to
+     * assign the id; putting it in the MDC by hand is exactly what {@code
+     * CorrelationIdFilter} does for a real request. {@code create}'s {@code
+     * AFTER_COMMIT} publish runs on this same thread, so the id is still set
+     * when the first Kafka record is sent.</p>
+     */
+    @Test
+    void correlationId_survivesEveryKafkaHopOfTheChain() {
+        Long seatId = seedSeat(new BigDecimal("50.00"));
+
+        MDC.put(MdcKeys.CORRELATION_ID, "chain-test-corr-id");
+        BookingResponse created;
+        try {
+            created = bookingService.create(userId, new BookingRequest(List.of(seatId)));
+        } finally {
+            MDC.remove(MdcKeys.CORRELATION_ID);
+        }
+        String bookingKey = String.valueOf(created.id());
+
+        try (Consumer<String, String> reader = topicReader("correlation-test-reader")) {
+            reader.subscribe(List.of(KafkaTopicConfig.PAYMENT_PROCESSED_TOPIC));
+
+            await().atMost(Duration.ofSeconds(20)).untilAsserted(() -> {
+                ConsumerRecords<String, String> records = reader.poll(Duration.ofMillis(500));
+                ConsumerRecord<String, String> match = null;
+                for (ConsumerRecord<String, String> record : records) {
+                    // Keyed by bookingId (see PaymentConsumer); the topic is
+                    // shared with every other test in this class.
+                    if (bookingKey.equals(record.key())) {
+                        match = record;
+                    }
+                }
+                assertThat(match)
+                        .as("payment-processed record for booking %s", bookingKey)
+                        .isNotNull();
+                Header header = match.headers().lastHeader(CorrelationId.HEADER);
+                assertThat(header).as("X-Correlation-Id header on the second hop").isNotNull();
+                assertThat(new String(header.value(), StandardCharsets.UTF_8)).isEqualTo("chain-test-corr-id");
+            });
+        }
+    }
+
     private Consumer<String, String> dltConsumer() {
-        Map<String, Object> props =
-                KafkaTestUtils.consumerProps(kafka.getBootstrapServers(), "dlt-test-reader", "true");
+        return topicReader("dlt-test-reader");
+    }
+
+    private Consumer<String, String> topicReader(String groupId) {
+        Map<String, Object> props = KafkaTestUtils.consumerProps(kafka.getBootstrapServers(), groupId, "true");
         return new DefaultKafkaConsumerFactory<String, String>(props).createConsumer();
     }
 }

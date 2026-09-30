@@ -2,6 +2,7 @@ package com.ahdyahmed.eventhub.config;
 
 import com.ahdyahmed.eventhub.common.exception.InvalidBookingStateTransitionException;
 import com.ahdyahmed.eventhub.common.exception.ResourceNotFoundException;
+import com.ahdyahmed.eventhub.common.logging.CorrelationIdRecordInterceptor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
@@ -34,6 +35,12 @@ import org.springframework.util.backoff.ExponentialBackOff;
  * that factory is updated in the same commit to use the identical {@link
  * CommonErrorHandler} bean, so the policy is genuinely one definition, not
  * two copies that could drift.</p>
+ *
+ * <p><strong>Day 17:</strong> the same replaced default factory is also
+ * where {@link CorrelationIdRecordInterceptor} is attached, for the same
+ * reason the error handler is — every unqualified {@code @KafkaListener}
+ * ({@code NotificationListener}, {@code PaymentConsumer}) restores the
+ * correlation id from the incoming record without knowing it happens.</p>
  */
 @Configuration
 public class KafkaErrorHandlingConfig {
@@ -117,6 +124,7 @@ public class KafkaErrorHandlingConfig {
                 new ConcurrentKafkaListenerContainerFactory<>();
         configurer.configure(factory, kafkaConsumerFactory);
         factory.setCommonErrorHandler(kafkaErrorHandler);
+        factory.setRecordInterceptor(new CorrelationIdRecordInterceptor<>());
         return factory;
     }
 }
