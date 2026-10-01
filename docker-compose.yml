@@ -42,13 +42,11 @@ services:
     container_name: eventhub-kafka
     restart: unless-stopped
     ports:
-      # Host port 9094 -> container 9092, same "avoid clashing with a local
-      # instance" reasoning as Postgres (5433) and Redis (6380). Unlike
-      # those two, the port also has to be repeated below in
-      # KAFKA_ADVERTISED_LISTENERS: Kafka's client protocol has the broker
-      # tell connecting clients which address to actually send requests to,
-      # and that has to be the host-reachable 9094, not the container-internal
-      # 9092, or a client outside the container gets an address it can't reach.
+      # Host port 9094 -> container 9092 (the EXTERNAL listener, below).
+      # Same "avoid clashing with a local instance" reasoning as Postgres
+      # (5433) and Redis (6380). This mapping is for clients running ON THE
+      # HOST (`mvn spring-boot:run`, a Kafka CLI); the app container doesn't
+      # use it - it talks to the broker over the compose network instead.
       - "9094:9092"
     environment:
       # KRaft mode: Kafka runs its own metadata quorum instead of depending
@@ -58,16 +56,29 @@ services:
       # workaround.
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9094
+      # Two client-facing listeners, because Kafka's protocol has the broker
+      # tell each client which address to use for every later request (the
+      # "advertised" address) - and the right address depends on WHERE the
+      # client is:
+      #   INTERNAL  kafka:29092      for other containers on the compose
+      #                              network (the app container). Resolved
+      #                              by compose DNS.
+      #   EXTERNAL  localhost:9094   for clients on the host machine, via
+      #                              the published port above.
+      # A single advertised address can't serve both: `localhost:9094` is
+      # the host's own loopback from inside the app container (nothing is
+      # listening there), and `kafka:29092` doesn't resolve on the host.
+      # This is what makes `docker compose up` and `mvn spring-boot:run`
+      # both work against the same broker.
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9094
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@eventhub-kafka:9093
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       # Replication factor 1 because there's exactly one broker in this
       # local stack - a real cluster would use 3 for durability. Called out
-      # explicitly rather than left to look like an oversight; see Design
-      # decisions.
+      # explicitly rather than left to look like an oversight.
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
@@ -75,11 +86,66 @@ services:
     volumes:
       - eventhub_kafkadata:/var/lib/kafka/data
     healthcheck:
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"]
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:29092"]
       interval: 10s
       timeout: 10s
       retries: 5
       start_period: 20s
+
+  app:
+    build: .
+    image: eventhub-booking-system:dev
+    container_name: eventhub-app
+    restart: unless-stopped
+    # Start order is gated on HEALTH, not just "container started": a plain
+    # depends_on only waits for the dependency's container to exist, and
+    # Postgres/Kafka take several seconds after that to accept connections.
+    # With service_healthy, compose holds the app back until each
+    # dependency's own healthcheck (defined above) passes - so Flyway's
+    # first migration and Kafka's topic creation don't race a database or
+    # broker that isn't ready yet.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      # Inside the compose network, services reach each other by SERVICE NAME
+      # on the container's own port - not on the host-mapped ports (5433,
+      # 6380, 9094) the host-side `mvn spring-boot:run` workflow uses.
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: eventhub_db
+      DB_USER: eventhub_user
+      DB_PASSWORD: eventhub_pass
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      # Overridable with `JWT_SECRET=... docker compose up`. The fallback is
+      # the same local-dev-only placeholder application.yml ships with: fine
+      # for a local demo, never for a real deployment.
+      JWT_SECRET: ${JWT_SECRET:-this-is-a-local-dev-only-placeholder-secret-replace-me-in-any-real-deployment}
+    ports:
+      - "8080:8080"
+    # The image's own HEALTHCHECK (liveness probe) applies automatically;
+    # `docker compose ps` shows it as "healthy" once the app is up.
+    deploy:
+      resources:
+        limits:
+          # The JVM sizes its heap as a percentage of THIS limit
+          # (MaxRAMPercentage in the Dockerfile), so setting it is what makes
+          # that flag meaningful rather than sizing from the host's RAM.
+          memory: 1g
+    # Day 17 made stdout a JSON log stream; without a cap, Docker's default
+    # json-file driver keeps all of it forever and the log file grows until
+    # the disk fills.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   eventhub_pgdata:

@@ -8,8 +8,7 @@ import org.springframework.kafka.config.TopicBuilder;
 /**
  * Kafka topic topology — the equivalent of the exchange/queue declarations
  * this project's roadmap originally planned for RabbitMQ, before Kafka was
- * chosen instead (see the README's Design decisions for the trade-offs of
- * that swap).
+ * chosen instead.
  *
  * <p>Declaring a {@link NewTopic} bean here is enough: Spring Boot
  * autoconfigures a {@code KafkaAdmin} whenever {@code spring-kafka} is on

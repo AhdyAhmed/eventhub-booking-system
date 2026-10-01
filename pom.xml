@@ -15,6 +15,13 @@
     <artifactId>eventhub-booking-system</artifactId>
     <version>0.0.1-SNAPSHOT</version>
     <name>eventhub-booking-system</name>
+    <licenses>
+        <license>
+            <name>MIT License</name>
+            <url>https://opensource.org/licenses/MIT</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
     <description>
         Production-grade event/ticket booking and order-processing system built with Spring Boot.
         Project 3 of a 3-project backend portfolio.
