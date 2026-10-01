@@ -92,6 +92,24 @@ class AuthServiceImplTest {
     }
 
     @Test
+    void register_normalizesEmailBeforePersistingAndIssuingToken() {
+        when(passwordEncoder.encode("plaintext-password")).thenReturn("hashed-password");
+        when(userRepository.save(any(User.class))).thenAnswer(inv -> {
+            User user = inv.getArgument(0);
+            user.setId(1L);
+            return user;
+        });
+
+        AuthResponse response = authService.register(
+                new RegisterRequest("New User", "  New-User@Example.COM  ", "plaintext-password"));
+
+        ArgumentCaptor<User> captor = ArgumentCaptor.forClass(User.class);
+        verify(userRepository).save(captor.capture());
+        assertThat(captor.getValue().getEmail()).isEqualTo("new-user@example.com");
+        assertThat(response.email()).isEqualTo("new-user@example.com");
+    }
+
+    @Test
     void login_happyPath_returnsTokenForAuthenticatedPrincipal() {
         User user = User.builder().id(1L).fullName("Existing User").email("existing@example.com")
                 .passwordHash("hashed-password").build();
@@ -117,5 +135,20 @@ class AuthServiceImplTest {
 
         assertThatThrownBy(() -> authService.login(new LoginRequest("nobody@example.com", "wrong-password")))
                 .isInstanceOf(BadCredentialsException.class);
+    }
+
+    @Test
+    void login_normalizesEmailBeforeAuthentication() {
+        User user = User.builder().id(1L).fullName("Existing User").email("existing@example.com")
+                .passwordHash("hashed-password").build();
+        Authentication authentication = new UsernamePasswordAuthenticationToken(new UserPrincipal(user), null);
+        when(authenticationManager.authenticate(any())).thenReturn(authentication);
+
+        authService.login(new LoginRequest("  Existing@Example.COM ", "correct-password"));
+
+        ArgumentCaptor<UsernamePasswordAuthenticationToken> captor =
+                ArgumentCaptor.forClass(UsernamePasswordAuthenticationToken.class);
+        verify(authenticationManager).authenticate(captor.capture());
+        assertThat(captor.getValue().getPrincipal()).isEqualTo("existing@example.com");
     }
 }

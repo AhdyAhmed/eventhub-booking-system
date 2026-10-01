@@ -80,6 +80,10 @@ public class BookingServiceImpl implements BookingService {
     @Override
     @Transactional
     public BookingResponse create(Long userId, BookingRequest request) {
+        if (request.seatIds().size() != request.seatIds().stream().distinct().count()) {
+            throw new BookingValidationException("seatIds must not contain duplicates");
+        }
+
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new ResourceNotFoundException("User not found with id " + userId));
 
@@ -143,15 +147,11 @@ public class BookingServiceImpl implements BookingService {
      * resolved them to {@code BOOKED} or they were still {@code RESERVED} —
      * either way, "cancelled" means the seat is free again.
      *
-     * <p><strong>A known, accepted gap:</strong> {@code Booking} carries no
-     * {@code @Version} column the way {@link Seat} does, so this method and
-     * {@code PaymentProcessedListener} racing to update the *same* booking
-     * at the *same* moment (a user cancels in the exact window payment is
-     * being mock-processed) is a possible lost update — whichever write
-     * commits last wins outright, with no conflict detected. Day 16 is
-     * about authentication and ownership, not this concurrency question,
-     * so it's named here rather than silently accepted or, worse, papered
-     * over with a fix that isn't actually tested.</p>
+     * <p>{@link Booking}'s optimistic-lock version prevents this method and
+     * {@code PaymentProcessedListener} from silently overwriting each other
+     * if cancellation races payment settlement. The losing transaction gets
+     * a conflict/retry outcome instead of committing a mixed booking/seat
+     * state.</p>
      */
     @Override
     @Transactional

@@ -4,18 +4,18 @@ services:
     container_name: eventhub-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: eventhub_db
-      POSTGRES_USER: eventhub_user
-      POSTGRES_PASSWORD: eventhub_pass
+      POSTGRES_DB: ${DB_NAME:-eventhub_db}
+      POSTGRES_USER: ${DB_USER:-eventhub_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-eventhub_pass}
     ports:
       # Host port 5433 -> container 5432.
       # Kept off the default 5432 on purpose so this doesn't clash with a
       # local Postgres instance already running on your machine.
-      - "5433:5432"
+      - "${DB_PORT:-5433}:5432"
     volumes:
       - eventhub_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U eventhub_user -d eventhub_db"]
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -28,7 +28,7 @@ services:
       # Host port 6380 -> container 6379, same reasoning as Postgres's 5433:
       # keeps this off the default port so it doesn't clash with a Redis
       # instance already running locally.
-      - "6380:6379"
+      - "${REDIS_PORT:-6380}:6379"
     volumes:
       - eventhub_redisdata:/data
     healthcheck:
@@ -47,7 +47,7 @@ services:
       # (5433) and Redis (6380). This mapping is for clients running ON THE
       # HOST (`mvn spring-boot:run`, a Kafka CLI); the app container doesn't
       # use it - it talks to the broker over the compose network instead.
-      - "9094:9092"
+      - "${KAFKA_HOST_PORT:-9094}:9092"
     environment:
       # KRaft mode: Kafka runs its own metadata quorum instead of depending
       # on a separate ZooKeeper ensemble - one container, one thing to run,
@@ -71,7 +71,7 @@ services:
       # This is what makes `docker compose up` and `mvn spring-boot:run`
       # both work against the same broker.
       KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9094
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:${KAFKA_HOST_PORT:-9094}
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@eventhub-kafka:9093
@@ -82,7 +82,9 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-      CLUSTER_ID: "eventhub-kraft-cluster-1"
+      # Kafka expects a 22-character URL-safe base64 UUID here; an arbitrary
+      # human-readable string makes storage formatting fail on first boot.
+      CLUSTER_ID: "4L6g3nShT-eMCtK--X86sw"
     volumes:
       - eventhub_kafkadata:/var/lib/kafka/data
     healthcheck:
@@ -94,7 +96,7 @@ services:
 
   app:
     build: .
-    image: eventhub-booking-system:dev
+    image: ${APP_IMAGE:-eventhub-booking-system:dev}
     container_name: eventhub-app
     restart: unless-stopped
     # Start order is gated on HEALTH, not just "container started": a plain
@@ -117,9 +119,9 @@ services:
       # 6380, 9094) the host-side `mvn spring-boot:run` workflow uses.
       DB_HOST: postgres
       DB_PORT: 5432
-      DB_NAME: eventhub_db
-      DB_USER: eventhub_user
-      DB_PASSWORD: eventhub_pass
+      DB_NAME: ${DB_NAME:-eventhub_db}
+      DB_USER: ${DB_USER:-eventhub_user}
+      DB_PASSWORD: ${DB_PASSWORD:-eventhub_pass}
       REDIS_HOST: redis
       REDIS_PORT: 6379
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
@@ -127,8 +129,12 @@ services:
       # the same local-dev-only placeholder application.yml ships with: fine
       # for a local demo, never for a real deployment.
       JWT_SECRET: ${JWT_SECRET:-this-is-a-local-dev-only-placeholder-secret-replace-me-in-any-real-deployment}
+      JWT_EXPIRATION_MS: ${JWT_EXPIRATION_MS:-3600000}
+      PAYMENT_MOCK_DECLINE_THRESHOLD: ${PAYMENT_MOCK_DECLINE_THRESHOLD:-1000.00}
+      SERVER_PORT: ${SERVER_PORT:-8080}
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-}
     ports:
-      - "8080:8080"
+      - "${SERVER_PORT:-8080}:${SERVER_PORT:-8080}"
     # The image's own HEALTHCHECK (liveness probe) applies automatically;
     # `docker compose ps` shows it as "healthy" once the app is up.
     deploy:
@@ -137,7 +143,7 @@ services:
           # The JVM sizes its heap as a percentage of THIS limit
           # (MaxRAMPercentage in the Dockerfile), so setting it is what makes
           # that flag meaningful rather than sizing from the host's RAM.
-          memory: 1g
+          memory: ${APP_MEMORY_LIMIT:-1g}
     # Day 17 made stdout a JSON log stream; without a cap, Docker's default
     # json-file driver keeps all of it forever and the log file grows until
     # the disk fills.

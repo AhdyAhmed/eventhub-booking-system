@@ -235,6 +235,15 @@ class BookingServiceImplTest {
     }
 
     @Test
+    void create_duplicateSeatIds_throwsBookingValidationBeforeDatabaseAccess() {
+        assertThatThrownBy(() -> bookingService.create(1L, new BookingRequest(List.of(100L, 100L))))
+                .isInstanceOf(BookingValidationException.class)
+                .hasMessageContaining("duplicates");
+
+        verifyNoInteractions(userRepository, seatRepository, bookingRepository, eventPublisher);
+    }
+
+    @Test
     void create_seatAlreadyTaken_throwsSeatUnavailableWithoutAttemptingSave() {
         Seat seat = seat(100L, event(10L), SeatStatus.RESERVED);
         when(userRepository.findById(1L)).thenReturn(Optional.of(user(1L)));

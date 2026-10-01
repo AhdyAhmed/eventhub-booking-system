@@ -1,6 +1,7 @@
 package com.ahdyahmed.eventhub.booking.dto;
 
 import jakarta.validation.constraints.NotEmpty;
+import jakarta.validation.constraints.NotNull;
 import java.util.List;
 
 /**
@@ -15,6 +16,6 @@ import java.util.List;
  */
 public record BookingRequest(
         @NotEmpty(message = "seatIds must contain at least one seat")
-        List<Long> seatIds
+        List<@NotNull(message = "seatIds must not contain null values") Long> seatIds
 ) {
 }

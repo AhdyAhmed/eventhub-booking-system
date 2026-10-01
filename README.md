@@ -2,7 +2,7 @@
 
 A production-grade event/ticket booking system demonstrating optimistic locking under concurrency, Redis caching, and event-driven order processing in Spring Boot. This is Project 3 of a 3-project backend portfolio (Core REST API → Auth & Authorization → **Production-grade Booking/Order System**).
 
-**Status:** 🚧 Day 18, Part 2 of 3 — `docker compose up --build` now runs the whole stack: the app, Postgres, Redis and Kafka, with health-gated startup. Env template, smoke test and docs (Part 3) come next. CI, CD, and load testing follow (see [Roadmap](#roadmap) below).
+**Status:** ✅ Day 18 complete — `docker compose up --build` runs the app, Postgres, Redis and Kafka with health-gated startup; configuration is documented in `.env.example`, and the full booking flow has a repeatable smoke test. CI, CD, and load testing follow (see [Roadmap](#roadmap) below).
 
 ---
 
@@ -29,15 +29,19 @@ A production-grade event/ticket booking system demonstrating optimistic locking 
 - Java 21 (JDK)
 - Maven 3.9+
 - Docker + Docker Compose
+- PowerShell 5.1+ (only for the full-stack smoke test)
 
 ## Running locally
 
 **Everything in containers** (the app too — the Docker image is built from the `Dockerfile`):
 
 ```bash
+cp .env.example .env       # optional: review/customize local values first
 docker compose up --build
 curl http://localhost:8080/actuator/health/liveness
 ```
+
+On Windows PowerShell, use `Copy-Item .env.example .env` instead of `cp`.
 
 **Or: dependencies in containers, app from your IDE/terminal** (faster edit-run cycle):
 
@@ -82,7 +86,7 @@ Both need Docker running to pass; `mvn verify` takes noticeably longer than `mvn
 
 ## Configuration
 
-All datasource settings are overridable via environment variables, with sane local defaults baked in:
+Copy `.env.example` to `.env` to customize the Compose stack. The application and Compose settings are overridable via environment variables, with sane local defaults baked in:
 
 | Variable       | Default          | Notes                                   |
 |-----------------|-------------------|------------------------------------------|
@@ -93,11 +97,15 @@ All datasource settings are overridable via environment variables, with sane loc
 | `REDIS_HOST`              | `localhost`                |                                            |
 | `REDIS_PORT`                | `6380`                        | Matches the host port in `docker-compose.yml` |
 | `KAFKA_BOOTSTRAP_SERVERS`     | `localhost:9094`                | Host-side address: the published port `9094` (not Kafka's usual `9092`, to avoid clashing with a local broker). Inside compose the app uses `kafka:29092` instead |
+| `KAFKA_HOST_PORT`             | `9094`                          | Compose host port for Kafka's external listener |
 | `SERVER_PORT`             | `8080`                    |                                            |
 | `JWT_SECRET`                | a local-dev placeholder      | **Must** be overridden in any real deployment — the default is committed to source control. Needs 32+ bytes for HS256 |
 | `JWT_EXPIRATION_MS`           | `3600000` (1 hour)             | Token lifetime                              |
+| `PAYMENT_MOCK_DECLINE_THRESHOLD` | `1000.00`                    | Mock payments at or above this total are declined |
 | `DB_HOST`                      | `localhost`                      | Postgres host. Added Day 18: inside a container this is the Postgres service's name, not `localhost` |
 | `SPRING_PROFILES_ACTIVE`        | *(unset)*                        | Unset = JSON logs. `pretty` = plain-text, human-readable console logs (Day 17) |
+| `APP_IMAGE`                     | `eventhub-booking-system:dev`    | Compose image name/tag |
+| `APP_MEMORY_LIMIT`              | `1g`                             | Compose memory limit used by container-aware JVM sizing |
 
 ## API reference
 
@@ -128,34 +136,40 @@ Every `POST`/`PUT` body is validated (`@Valid`); every error response — valida
 
 **Correlation IDs (Day 17):** every response — success or error — carries an `X-Correlation-Id` header, and every error body repeats it as `correlationId`. Send your own `X-Correlation-Id` (letters, digits, `.`, `_`, `-`, up to 64 characters) and it's reused; anything else is replaced with a generated UUID. It's the string to quote when reporting a problem, and the one to search the logs for.
 
-**A note on the examples below:** sections through Day 15 predate authentication — their `curl` commands post a `userId` field with no `Authorization` header and won't run as-is against this version. The [Authenticated flow](#authenticated-flow-register-book-cancel) section has the current, runnable register → login → book → cancel flow.
+**A note on the historical walkthrough below:** the numbered Day 1–15 walkthrough records how the system was built and predates authentication, so its mutation commands are not a current smoke test. Use the [Authenticated flow](#authenticated-flow-register-book-cancel) for runnable register → login → book → cancel commands against this version.
 
 ## Usage examples
 
-**Full happy path — venue → event → seat → user → booking:**
+**Full happy path — register → venue → event → seat → booking:**
 
 ```bash
+curl -X POST http://localhost:8080/api/v1/auth/register -H "Content-Type: application/json" \
+  -d '{"fullName":"Ahmed Test","email":"ahmed@example.com","password":"correct-horse-battery"}'
+TOKEN=<paste-the-token-from-the-response>
+
 curl -X POST http://localhost:8080/api/v1/venues -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
   -d '{"name":"Cairo Arena","city":"Cairo","address":"Nasr City","capacity":5000}'
 
 curl -X POST http://localhost:8080/api/v1/events -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
   -d '{"venueId":1,"name":"Launch Night","description":"Opening event","category":"CONCERT","eventDate":"2026-12-01T19:00:00Z"}'
 
 curl -X POST http://localhost:8080/api/v1/events/1/seats -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
   -d '{"seatNumber":"A1","section":"Floor","price":50.00}'
 
-curl -X POST http://localhost:8080/api/v1/users -H "Content-Type: application/json" \
-  -d '{"fullName":"Ahmed Test","email":"ahmed@example.com"}'
-
 curl -X POST http://localhost:8080/api/v1/bookings -H "Content-Type: application/json" \
-  -d '{"userId":1,"seatIds":[1]}'
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"seatIds":[1]}'
 ```
 
 **Trying to book the same seat again returns 409, not a 500** (and Day 7's `BookingConcurrencyIT` proves this holds even when the requests genuinely race, not just when they're sequential like this):
 
 ```bash
 curl -i -X POST http://localhost:8080/api/v1/bookings -H "Content-Type: application/json" \
-  -d '{"userId":1,"seatIds":[1]}'
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"seatIds":[1]}'
 ```
 
 **Paginated, filterable, sortable event search:**
@@ -179,6 +193,7 @@ curl "http://localhost:8080/api/v1/events?fromDate=2026-01-01T00:00:00Z&toDate=2
 ```bash
 curl -i -X POST http://localhost:8080/api/v1/events \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
   -d '{"venueId":1,"name":"","category":"NOT_REAL","eventDate":"2020-01-01T00:00:00Z"}'
 ```
 
@@ -407,6 +422,8 @@ curl -i http://localhost:8080/actuator/health                          # 200 - p
 Dockerfile                   # Day 18 - multi-stage build: Maven build stage -> JRE-only, non-root runtime image
 .dockerignore                # Day 18 - keeps target/, .git, IDE files and .env out of the build context
 docker-compose.yml           # Day 18 - the full stack: app + Postgres + Redis + Kafka, health-gated startup
+.env.example                 # Day 18 - safe, committed template for local Compose configuration
+scripts/smoke-test.ps1       # Day 18 - end-to-end register -> book -> pay -> cancel verification
 LICENSE                      # MIT
 pom.xml
 
@@ -537,7 +554,9 @@ src/main/resources/
     ├── V1__baseline.sql
     ├── V2__domain_schema.sql             # users, venues, events, seats, bookings, booking_items
     ├── V3__seat_optimistic_locking.sql   # adds seats.version
-    └── V4__add_user_password.sql         # Day 16 - users.password_hash
+    ├── V4__add_user_password.sql         # Day 16 - users.password_hash
+    ├── V5__booking_optimistic_locking.sql # prevents cancel/payment lost updates
+    └── V6__case_insensitive_user_email.sql # enforces normalized email identity
 
 src/test/java/com/ahdyahmed/eventhub/
 ├── EventhubApplicationTests.java        # Testcontainers context + schema/entity consistency check
@@ -577,11 +596,11 @@ Packages are organized **by feature (vertical slice)**, not by technical layer (
 
 The roadmap's own words: "Multi-stage `Dockerfile` for the app (small final image). Finalize `docker-compose.yml`: app + postgres + redis + rabbitmq, one `docker compose up` should run everything." (This project uses Kafka, not RabbitMQ — so the stack is app + Postgres + Redis + Kafka.)
 
-Day 18 is built in three parts. **Parts 1 and 2 are done; Part 3 is not started.**
+Day 18 is built in three parts. **All three parts are complete.**
 
 - [x] **Part 1 — the image.** Multi-stage `Dockerfile` + `.dockerignore`, and the one config change the app needed to run in a container.
 - [x] **Part 2 — the stack.** The app joins `docker-compose.yml`, with health-gated startup order and Kafka reachable from both the host and other containers.
-- [ ] **Part 3 — polish.** `.env.example`, a full-stack smoke test, docs.
+- [x] **Part 3 — polish.** `.env.example`, a full-stack smoke test, docs.
 
 ### Part 1: the image
 
@@ -603,16 +622,25 @@ Day 18 is built in three parts. **Parts 1 and 2 are done; Part 3 is not started.
 - **Log rotation** (`json-file`, 10 MB x 3) — Day 17 made stdout a JSON log stream, and Docker's default driver keeps all of it forever.
 - **`JWT_SECRET` is overridable** (`JWT_SECRET=... docker compose up`). The fallback is the same local-dev-only placeholder `application.yml` ships with — fine for a local demo, never for a real deployment.
 
+### Part 3: release polish
+
+- **`.env.example`** documents every Compose-level setting without committing a real secret. Copy it to the ignored `.env` file before changing ports, credentials, image tags, memory, token lifetime, or the mock payment threshold.
+- **`scripts/smoke-test.ps1`** exercises the actual running stack: readiness, registration, authenticated venue/event/seat creation, asynchronous Kafka payment confirmation, booked-seat state, cancellation, seat release, and correlation-ID propagation. Each run creates uniquely named data, so it is repeatable against a persistent local database.
+- **Compose defaults remain zero-config.** The environment template is optional; `docker compose up --build` still works with the documented defaults.
+
 ### Try it
 
 ```bash
 # Everything: Postgres + Redis + Kafka + the app. First run builds the image.
-docker compose up --build
+docker compose up -d --build
 
-# In another terminal - the app container should become "healthy"
+# The app container should become "healthy"
 docker compose ps
 curl http://localhost:8080/actuator/health/liveness     # {"status":"UP"}
 curl http://localhost:8080/actuator/health/readiness    # {"status":"UP"}
+
+# Windows PowerShell: run the full booking/payment/cancellation smoke test
+.\scripts\smoke-test.ps1
 
 # The app's JSON logs, including the Flyway migrations and Kafka startup
 docker compose logs -f app
@@ -630,6 +658,11 @@ Things to know:
 - **Port clash:** the `app` container publishes `8080`. If you also run `mvn spring-boot:run` at the same time, one of them can't bind it — stop one, or set a different `SERVER_PORT` locally.
 - **Infra only:** `docker compose up -d postgres redis kafka` starts just the dependencies, for the original run-the-app-from-your-IDE workflow; the host-mapped ports are unchanged.
 - **Existing Kafka volume:** if you started the old single-listener Kafka earlier, its data volume is reused and works with the new listeners. If anything looks stuck, `docker compose down -v` gives a clean slate.
+
+### Current design trade-offs
+
+- **Kafka instead of the roadmap's default RabbitMQ suggestion:** keyed messages give per-booking ordering, while independent consumer groups and explicit retry/DLT behavior demonstrate the event-stream semantics this project needs. The extra broker configuration is intentional, not an accidental queue replacement.
+- **After-commit publishing is not a transactional outbox:** consumers never see a rolled-back booking, but there is still a small crash window between the database commit and Kafka acknowledgement. A production version would write an outbox row in the booking transaction and publish/retry it separately; the current roadmap treats that extra infrastructure as a stretch goal.
 
 ## Roadmap
 
@@ -657,7 +690,7 @@ Things to know:
 **Week 4 — Production readiness**
 - [x] Day 16 — JWT auth + booking ownership checks, Actuator hardening
 - [x] Day 17 — structured JSON logging with correlation IDs
-- [ ] Day 18 — multi-stage Dockerfile + full docker-compose stack (app + Postgres + Redis + Kafka) — *in progress: Parts 1-2 of 3 (the image, the stack) done*
+- [x] Day 18 — multi-stage Dockerfile + full docker-compose stack (app + Postgres + Redis + Kafka), environment template, and end-to-end smoke test
 - [ ] Day 19 — GitHub Actions CI (test + build on push)
 - [ ] Day 20 — GitHub Actions CD (build & push image)
 - [ ] Day 21 — load test under concurrency, fix findings

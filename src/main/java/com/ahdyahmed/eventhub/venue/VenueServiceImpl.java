@@ -5,6 +5,8 @@ import com.ahdyahmed.eventhub.venue.dto.VenueRequest;
 import com.ahdyahmed.eventhub.venue.dto.VenueResponse;
 import java.util.List;
 import lombok.RequiredArgsConstructor;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Caching;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -38,6 +40,10 @@ public class VenueServiceImpl implements VenueService {
 
     @Override
     @Transactional
+    @Caching(evict = {
+            @CacheEvict(cacheNames = "events", allEntries = true),
+            @CacheEvict(cacheNames = "event-search", allEntries = true)
+    })
     public VenueResponse update(Long id, VenueRequest request) {
         Venue venue = findOrThrow(id);
         venueMapper.updateEntity(venue, request);
@@ -46,6 +52,10 @@ public class VenueServiceImpl implements VenueService {
 
     @Override
     @Transactional
+    @Caching(evict = {
+            @CacheEvict(cacheNames = "events", allEntries = true),
+            @CacheEvict(cacheNames = "event-search", allEntries = true)
+    })
     public void delete(Long id) {
         venueRepository.delete(findOrThrow(id));
     }

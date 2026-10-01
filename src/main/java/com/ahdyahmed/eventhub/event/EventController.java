@@ -42,7 +42,7 @@ public class EventController {
 
     /**
      * Paginated, sortable, dynamically filterable event search. Every filter
-     * param is optional — omit all of them to page through everything.
+     * param is optional — omit all of them to page through upcoming events.
      * Sortable via the standard {@code ?sort=eventDate,desc} (repeatable)
      * query param, e.g. {@code ?sort=eventDate,asc&sort=category,asc}.
      */

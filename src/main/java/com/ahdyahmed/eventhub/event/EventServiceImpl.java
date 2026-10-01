@@ -7,6 +7,7 @@ import com.ahdyahmed.eventhub.event.dto.EventResponse;
 import com.ahdyahmed.eventhub.event.dto.EventSearchCriteria;
 import com.ahdyahmed.eventhub.venue.Venue;
 import com.ahdyahmed.eventhub.venue.VenueRepository;
+import java.time.Instant;
 import lombok.RequiredArgsConstructor;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Cacheable;
@@ -52,11 +53,15 @@ public class EventServiceImpl implements EventService {
     // same filters + page/sort land on the same key.
     @Cacheable(cacheNames = "event-search")
     public PageResponse<EventResponse> search(EventSearchCriteria criteria, Pageable pageable) {
+        // The discovery endpoint is an upcoming-events listing by default,
+        // as specified by the roadmap. Callers can still supply a later
+        // lower bound, but omitting fromDate must never surface past events.
+        Instant effectiveFromDate = criteria.fromDate() == null ? Instant.now() : criteria.fromDate();
         Specification<Event> spec = Specification
                 .where(EventSpecifications.hasVenueId(criteria.venueId()))
                 .and(EventSpecifications.hasCity(criteria.city()))
                 .and(EventSpecifications.hasCategory(criteria.category()))
-                .and(EventSpecifications.eventDateFrom(criteria.fromDate()))
+                .and(EventSpecifications.eventDateFrom(effectiveFromDate))
                 .and(EventSpecifications.eventDateTo(criteria.toDate()));
 
         Page<Event> page = eventRepository.findAll(spec, pageable);

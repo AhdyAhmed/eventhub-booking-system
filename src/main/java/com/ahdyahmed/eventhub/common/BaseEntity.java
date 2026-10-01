@@ -11,6 +11,7 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 import lombok.experimental.SuperBuilder;
+import org.hibernate.proxy.HibernateProxy;
 import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.UpdateTimestamp;
 
@@ -61,7 +62,7 @@ public abstract class BaseEntity {
         if (this == o) {
             return true;
         }
-        if (!(o instanceof BaseEntity that)) {
+        if (!(o instanceof BaseEntity that) || effectiveClass(this) != effectiveClass(that)) {
             return false;
         }
         return id != null && id.equals(that.getId());
@@ -69,7 +70,14 @@ public abstract class BaseEntity {
 
     @Override
     public int hashCode() {
-        return getClass().hashCode();
+        return effectiveClass(this).hashCode();
+    }
+
+    private static Class<?> effectiveClass(BaseEntity entity) {
+        if (entity instanceof HibernateProxy proxy) {
+            return proxy.getHibernateLazyInitializer().getPersistentClass();
+        }
+        return entity.getClass();
     }
 
 }

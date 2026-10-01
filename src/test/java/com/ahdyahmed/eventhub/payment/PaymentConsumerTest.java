@@ -1,9 +1,11 @@
 package com.ahdyahmed.eventhub.payment;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -43,7 +45,7 @@ class PaymentConsumerTest {
         // calls .getRecordMetadata().partition() - RETURNS_DEEP_STUBS
         // keeps that chain from NPE-ing without needing an embedded/real
         // broker for this test.
-        when(kafkaTemplate.send(any(String.class), any(String.class), any()))
+        lenient().when(kafkaTemplate.send(any(String.class), any(String.class), any()))
                 .thenReturn(CompletableFuture.completedFuture(mock(SendResult.class, Answers.RETURNS_DEEP_STUBS)));
     }
 
@@ -80,5 +82,17 @@ class PaymentConsumerTest {
         PaymentProcessedEvent published = captor.getValue();
         assertThat(published.status()).isEqualTo(PaymentStatus.FAILED);
         assertThat(published.reason()).isEqualTo("amount exceeds limit");
+    }
+
+    @Test
+    void onBookingConfirmed_publishFailureEscapesSoListenerRetryPolicyCanHandleIt() {
+        BookingConfirmedEvent booking = new BookingConfirmedEvent(
+                500L, 1L, "test@example.com", 10L, List.of(100L), new BigDecimal("50.00"), Instant.now());
+        when(paymentService.charge(booking)).thenReturn(PaymentResult.success());
+        when(kafkaTemplate.send(any(String.class), any(String.class), any()))
+                .thenReturn(CompletableFuture.failedFuture(new RuntimeException("broker unavailable")));
+
+        assertThatThrownBy(() -> consumer.onBookingConfirmed(booking))
+                .hasRootCauseMessage("broker unavailable");
     }
 }

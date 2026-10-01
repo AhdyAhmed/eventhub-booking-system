@@ -3,22 +3,35 @@ package com.ahdyahmed.eventhub.event;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.ahdyahmed.eventhub.common.exception.ResourceNotFoundException;
 import com.ahdyahmed.eventhub.event.dto.EventRequest;
 import com.ahdyahmed.eventhub.event.dto.EventResponse;
+import com.ahdyahmed.eventhub.event.dto.EventSearchCriteria;
 import com.ahdyahmed.eventhub.venue.Venue;
 import com.ahdyahmed.eventhub.venue.VenueRepository;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Optional;
+import jakarta.persistence.criteria.CriteriaBuilder;
+import jakarta.persistence.criteria.CriteriaQuery;
+import jakarta.persistence.criteria.Path;
+import jakarta.persistence.criteria.Predicate;
+import jakarta.persistence.criteria.Root;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
+import org.mockito.ArgumentCaptor;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.domain.Specification;
 
 @ExtendWith(MockitoExtension.class)
 class EventServiceImplTest {
@@ -105,6 +118,33 @@ class EventServiceImplTest {
         assertThatThrownBy(() -> eventService.getById(404L))
                 .isInstanceOf(ResourceNotFoundException.class)
                 .hasMessageContaining("404");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void search_withoutFromDate_defaultsToUpcomingEvents() {
+        when(eventRepository.findAll(any(Specification.class), any(Pageable.class))).thenReturn(Page.empty());
+        Instant before = Instant.now();
+
+        eventService.search(new EventSearchCriteria(null, null, null, null, null), Pageable.unpaged());
+
+        Instant after = Instant.now();
+        ArgumentCaptor<Specification<Event>> specificationCaptor = ArgumentCaptor.forClass(Specification.class);
+        verify(eventRepository).findAll(specificationCaptor.capture(), eq(Pageable.unpaged()));
+
+        Root<Event> root = mock(Root.class);
+        CriteriaQuery<?> query = mock(CriteriaQuery.class);
+        CriteriaBuilder builder = mock(CriteriaBuilder.class);
+        Path<Instant> eventDatePath = mock(Path.class);
+        Predicate predicate = mock(Predicate.class);
+        when(root.<Instant>get("eventDate")).thenReturn(eventDatePath);
+        when(builder.greaterThanOrEqualTo(eq(eventDatePath), any(Instant.class))).thenReturn(predicate);
+
+        specificationCaptor.getValue().toPredicate(root, query, builder);
+
+        ArgumentCaptor<Instant> lowerBound = ArgumentCaptor.forClass(Instant.class);
+        verify(builder).greaterThanOrEqualTo(eq(eventDatePath), lowerBound.capture());
+        assertThat(lowerBound.getValue()).isBetween(before, after);
     }
 
 }

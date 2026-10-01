@@ -26,7 +26,7 @@ public class EventHubUserDetailsService implements UserDetailsService {
 
     @Override
     public UserDetails loadUserByUsername(String email) {
-        User user = userRepository.findByEmail(email)
+        User user = userRepository.findByEmailIgnoreCase(email)
                 .orElseThrow(() -> new UsernameNotFoundException("No user found with email " + email));
         return new UserPrincipal(user);
     }

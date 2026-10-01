@@ -71,24 +71,16 @@ public class PaymentConsumer {
         // every message about one booking - this one, and whatever a future
         // cancellation event adds - lands on the same partition, so a
         // consumer sees them in the order they actually happened.
-        kafkaTemplate.send(KafkaTopicConfig.PAYMENT_PROCESSED_TOPIC, event.bookingId().toString(), processed)
-                .whenComplete((sendResult, ex) -> {
-                    if (ex != null) {
-                        // Fire-and-forget by design, same accepted gap as the
-                        // producer side of BookingConfirmedEventPublisher - no
-                        // retry/DLT here. Day 15's retry/DLT policy is scoped
-                        // to the *consumer* side of a topic (a listener
-                        // method throwing); a KafkaTemplate.send() call
-                        // failing to reach the broker at all is a different,
-                        // still-open gap producer retry/idempotence configs
-                        // would address, not something on this project's
-                        // roadmap yet.
-                        log.error("Failed to publish PaymentProcessedEvent for booking {}",
-                                event.bookingId(), ex);
-                    } else {
-                        log.debug("Published PaymentProcessedEvent ({}) for booking {} to partition {}",
-                                result.status(), event.bookingId(), sendResult.getRecordMetadata().partition());
-                    }
-                });
+        // Wait for broker acknowledgement before returning from the listener.
+        // If the publish fails, join() propagates the failure so the shared
+        // listener error handler retries and ultimately dead-letters the
+        // incoming booking event instead of committing its offset and losing
+        // the payment result. The mock charge is deterministic/idempotent, so
+        // replaying this listener is safe in the current application.
+        var sendResult = kafkaTemplate
+                .send(KafkaTopicConfig.PAYMENT_PROCESSED_TOPIC, event.bookingId().toString(), processed)
+                .join();
+        log.debug("Published PaymentProcessedEvent ({}) for booking {} to partition {}",
+                result.status(), event.bookingId(), sendResult.getRecordMetadata().partition());
     }
 }

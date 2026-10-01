@@ -8,6 +8,6 @@ public interface UserRepository extends JpaRepository<User, Long> {
     // Day 16: how EventHubUserDetailsService and AuthServiceImpl's
     // duplicate-email pre-check both look a user up by the thing they
     // actually authenticate with - email, not id.
-    Optional<User> findByEmail(String email);
+    Optional<User> findByEmailIgnoreCase(String email);
 
 }

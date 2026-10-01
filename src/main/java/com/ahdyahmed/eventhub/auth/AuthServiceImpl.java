@@ -5,6 +5,7 @@ import com.ahdyahmed.eventhub.auth.dto.LoginRequest;
 import com.ahdyahmed.eventhub.auth.dto.RegisterRequest;
 import com.ahdyahmed.eventhub.user.User;
 import com.ahdyahmed.eventhub.user.UserRepository;
+import java.util.Locale;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
@@ -41,7 +42,7 @@ public class AuthServiceImpl implements AuthService {
         // mapped to a clean 409 by GlobalExceptionHandler since Day 5.
         User user = User.builder()
                 .fullName(request.fullName())
-                .email(request.email())
+                .email(normalizeEmail(request.email()))
                 .passwordHash(passwordEncoder.encode(request.password()))
                 .build();
         User saved = userRepository.save(user);
@@ -61,10 +62,14 @@ public class AuthServiceImpl implements AuthService {
         // independent, potentially-diverging implementations of "check a
         // password."
         Authentication authentication = authenticationManager.authenticate(
-                new UsernamePasswordAuthenticationToken(request.email(), request.password()));
+                new UsernamePasswordAuthenticationToken(normalizeEmail(request.email()), request.password()));
 
         UserPrincipal principal = (UserPrincipal) authentication.getPrincipal();
         String token = jwtService.generateToken(principal);
         return new AuthResponse(token, principal.getId(), principal.getFullName(), principal.getUsername());
+    }
+
+    private String normalizeEmail(String email) {
+        return email.trim().toLowerCase(Locale.ROOT);
     }
 }
