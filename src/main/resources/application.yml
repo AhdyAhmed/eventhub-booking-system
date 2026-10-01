@@ -10,7 +10,12 @@ spring:
     banner-mode: "off"
 
   datasource:
-    url: jdbc:postgresql://localhost:${DB_PORT:5433}/${DB_NAME:eventhub_db}
+    # Day 18: DB_HOST added. The host used to be hardcoded to localhost,
+    # which is right on a developer machine and wrong inside a container,
+    # where "localhost" is the app's own container and Postgres is a
+    # different one reachable by its compose service name. Defaults are
+    # unchanged, so running the app locally works exactly as before.
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5433}/${DB_NAME:eventhub_db}
     username: ${DB_USER:eventhub_user}
     password: ${DB_PASSWORD:eventhub_pass}
     driver-class-name: org.postgresql.Driver

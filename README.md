@@ -2,7 +2,7 @@
 
 A production-grade event/ticket booking system demonstrating optimistic locking under concurrency, Redis caching, and event-driven order processing in Spring Boot. This is Project 3 of a 3-project backend portfolio (Core REST API → Auth & Authorization → **Production-grade Booking/Order System**).
 
-**Status:** 🚧 Day 17 — structured JSON logging with a correlation ID that follows a request from the HTTP call through both Kafka hops, plus lifecycle events (booking created, payment processed, notification sent) you can query by field. Docker, CI, and load testing land over the following days (see [Roadmap](#roadmap) below).
+**Status:** 🚧 Day 18, Part 1 of 3 — the app now has a multi-stage, non-root, layered Docker image. Wiring it into `docker compose up` (Part 2) and the smoke test and docs (Part 3) come next. CI, CD, and load testing follow (see [Roadmap](#roadmap) below).
 
 ---
 
@@ -18,6 +18,7 @@ A production-grade event/ticket booking system demonstrating optimistic locking 
 | Messaging               | Apache Kafka (KRaft mode, from Day 11)     |
 | Auth                     | Spring Security + stateless JWT (HS256, jjwt), from Day 16 |
 | Logging                   | SLF4J/Logback, JSON via `logstash-logback-encoder`, MDC correlation IDs (from Day 17) |
+| Container                 | Multi-stage Docker build, JRE-only Alpine runtime image, non-root (Day 18) |
 | Testing                  | JUnit 5, Mockito, Testcontainers (Postgres, Kafka), Awaitility |
 | Build                     | Maven                                       |
 | Containerization           | Docker / Docker Compose                     |
@@ -45,7 +46,7 @@ A production-grade event/ticket booking system demonstrating optimistic locking 
    ```
    Expected: `{"status":"UP"}`
 
-Logs are one JSON object per line by default (see [What Day 17 adds](#what-day-17-adds)). For readable plain-text output while developing:
+Logs are one JSON object per line by default (structured, with a correlation ID on every line). For readable plain-text output while developing:
 
 ```bash
 SPRING_PROFILES_ACTIVE=pretty mvn spring-boot:run
@@ -86,6 +87,7 @@ All datasource settings are overridable via environment variables, with sane loc
 | `SERVER_PORT`             | `8080`                    |                                            |
 | `JWT_SECRET`                | a local-dev placeholder      | **Must** be overridden in any real deployment — the default is committed to source control. Needs 32+ bytes for HS256 |
 | `JWT_EXPIRATION_MS`           | `3600000` (1 hour)             | Token lifetime                              |
+| `DB_HOST`                      | `localhost`                      | Postgres host. Added Day 18: inside a container this is the Postgres service's name, not `localhost` |
 | `SPRING_PROFILES_ACTIVE`        | *(unset)*                        | Unset = JSON logs. `pretty` = plain-text, human-readable console logs (Day 17) |
 
 ## API reference
@@ -111,13 +113,13 @@ All datasource settings are overridable via environment variables, with sane loc
 | GET    | `/api/v1/bookings/{id}`                             | Yes | Get one booking — 403 if it isn't yours                             |
 | POST   | `/api/v1/bookings/{id}/cancel`                       | Yes | Cancel your own booking, releasing its seats             |
 
-"No" means the endpoint is reachable without a token (public browsing, or the two endpoints whose whole job is to hand one out); everything marked "Yes" needs `Authorization: Bearer <token>` from `/api/v1/auth/login` or `/api/v1/auth/register`, or a `401` comes back instead. See [What Day 16 adds](#what-day-16-adds) for the full picture and [SecurityConfig](#project-structure)'s own reasoning for exactly where that line sits.
+"No" means the endpoint is reachable without a token (public browsing, or the two endpoints whose whole job is to hand one out); everything marked "Yes" needs `Authorization: Bearer <token>` from `/api/v1/auth/login` or `/api/v1/auth/register`, or a `401` comes back instead. See [Authenticated flow](#authenticated-flow-register-book-cancel) for a runnable example and [SecurityConfig](#project-structure)'s own reasoning for exactly where that line sits.
 
 Every `POST`/`PUT` body is validated (`@Valid`); every error response — validation failure, not-found, conflict, unauthorized, forbidden, or unexpected — comes back in the one shape `ErrorResponse` defines. See [Usage examples](#usage-examples) for what each looks like.
 
 **Correlation IDs (Day 17):** every response — success or error — carries an `X-Correlation-Id` header, and every error body repeats it as `correlationId`. Send your own `X-Correlation-Id` (letters, digits, `.`, `_`, `-`, up to 64 characters) and it's reused; anything else is replaced with a generated UUID. It's the string to quote when reporting a problem, and the one to search the logs for.
 
-**A note on the examples below:** sections through Day 15 predate authentication — their `curl` commands post a `userId` field with no `Authorization` header and won't run as-is against this version. The [What Day 16 adds](#what-day-16-adds) section has the current, runnable register → login → book → cancel flow.
+**A note on the examples below:** sections through Day 15 predate authentication — their `curl` commands post a `userId` field with no `Authorization` header and won't run as-is against this version. The [Authenticated flow](#authenticated-flow-register-book-cancel) section has the current, runnable register → login → book → cancel flow.
 
 ## Usage examples
 
@@ -361,9 +363,43 @@ docker exec eventhub-kafka /opt/kafka/bin/kafka-console-consumer.sh \
 
 To see the decline branch instead, book a seat priced above `payment.mock.decline-threshold` (default `1000.00`) — the booking settles on `FAILED` and the seat referenced above goes back to `AVAILABLE` (confirm with `GET /api/v1/events/1/seats`) instead of staying `RESERVED` forever.
 
+### Authenticated flow: register, book, cancel
+
+Since Day 16 every booking endpoint needs a token. With the stack up and the app running:
+
+```bash
+# 1. register (returns a token immediately) - or POST /api/v1/auth/login later
+curl -s -X POST http://localhost:8080/api/v1/auth/register -H "Content-Type: application/json" \
+  -d '{"fullName":"Sara","email":"sara@example.com","password":"correct-horse-battery"}'
+# {"token":"eyJ...","userId":1,"fullName":"Sara","email":"sara@example.com"}
+
+TOKEN=<paste the token from above>
+
+# 2. create seats (needs auth now) and book one - note: no userId in the body anymore
+curl -X POST http://localhost:8080/api/v1/events/1/seats -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d '{"seatNumber":"B1","section":"Floor","price":50.00}'
+
+curl -X POST http://localhost:8080/api/v1/bookings -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d '{"seatIds":[7]}'
+
+# 3. cancel it - the seat goes back to AVAILABLE
+curl -X POST http://localhost:8080/api/v1/bookings/<id>/cancel -H "Authorization: Bearer $TOKEN"
+
+# 4. the things that should fail
+curl -i http://localhost:8080/api/v1/bookings/<id>                     # 401 - no token
+curl -i http://localhost:8080/actuator/metrics                         # 401 - metrics are locked
+curl -i http://localhost:8080/actuator/health                          # 200 - probes stay open
+# register a second user, then GET the first user's booking with their token -> 403
+```
+
 ## Project structure
 
 ```
+Dockerfile                   # Day 18 - multi-stage build: Maven build stage -> JRE-only, non-root runtime image
+.dockerignore                # Day 18 - keeps target/, .git, IDE files and .env out of the build context
+docker-compose.yml           # Postgres, Redis, Kafka (the app joins in Day 18 Part 2)
+pom.xml
+
 src/main/java/com/ahdyahmed/eventhub/
 ├── EventhubApplication.java   # entry point
 ├── common/
@@ -527,197 +563,50 @@ integration/
 
 Packages are organized **by feature (vertical slice)**, not by technical layer (i.e. no top-level `entity/`, `repository/`, `service/`, `controller/` packages holding everything). Each domain concept — `user`, `venue`, `event`, `seat`, `booking` — owns its own entity, repository, service, controller, and DTOs. This scales better than layer-first packaging once a domain has more than a handful of types.
 
-## What Day 13 adds
+## What Day 18 adds
 
-`NotificationListener` — this project's decoupling proof point. `BookingServiceImpl` has no reference to it, no import, no idea it exists. Delete the whole `notification` package and the booking flow doesn't change by one line; the only difference is nobody's mock-emailing the user anymore.
+The roadmap's own words: "Multi-stage `Dockerfile` for the app (small final image). Finalize `docker-compose.yml`: app + postgres + redis + rabbitmq, one `docker compose up` should run everything." (This project uses Kafka, not RabbitMQ — so the stack is app + Postgres + Redis + Kafka.)
 
-- **`NotificationListener.onBookingConfirmed`** — a `@KafkaListener` on `booking-confirmed-events` that logs a mock confirmation email. The roadmap's own words for this step were "logs/mocks an email send," and that's exactly the scope kept here — no email provider, no template, just proof that an independent consumer received and reacted to the event.
-- **`BookingConfirmedEvent` gained a `userEmail` field** — so this listener doesn't need a `UserRepository` dependency (or worse, direct database access) just to know who to notify. A real multi-service deployment wouldn't have a notification service sharing this app's database at all; putting what a consumer needs directly on the event is what keeps that possible later without changing the contract. `BookingServiceImpl` already had the `User` loaded for the booking itself, so this cost nothing extra to populate.
-- **Each `@KafkaListener` sets its own `groupId` explicitly, rather than inheriting one shared default from `application.yml`** — this is a Kafka-specific decision worth understanding, not a style preference. A consumer group is a *load-balancing* unit: every consumer in the same group competes for a topic's partitions, so only one of them gets any given message — correct behavior for scaling one logical service horizontally, wrong behavior across two different services that both need to see every message. Day 14 adds a payment consumer reacting to this same topic; giving it its own group id (rather than sharing `notification-service`'s) is what makes both consumers receive every event independently, the Kafka equivalent of RabbitMQ's fanout exchange with one queue per consumer.
-- **Consumer-side deserialization mirrors Day 12's producer choice** — `spring.json.use.type.headers: false` plus an explicit `spring.json.value.default.type`, since the producer never sends a `__TypeId__` header to read one from. `spring.json.trusted.packages` is required by `JsonDeserializer` regardless of that choice — it refuses to deserialize into arbitrary classes by default, the same reasoning `CacheConfig`'s Redis `ObjectMapper` needed a `PolymorphicTypeValidator` for back on Day 8.
-- **No retry, no dead-letter handling — flagged, not fixed, here** — an exception thrown inside `onBookingConfirmed` today gets logged by Spring Kafka's default error handler and the message is effectively dropped: silent data loss for that one notification. That's Day 15's job, the same "flag the gap in code before closing it" pattern as the Day 8→9 caching story.
-- **More Kafka connection noise in tests without a broker, same accepted trade-off as Day 12's producer side** — `@KafkaListener` containers start polling in a background thread as soon as the Spring context comes up, so `EventhubApplicationTests`, `BookingConcurrencyIT`, and `RedisCacheIT` will all now log connection-refused retries from this listener too. Still non-fatal, still doesn't touch any test's assertions.
+Day 18 is built in three parts. **Part 1 is done; Parts 2 and 3 are not started.**
 
-**Try it** (with the stack up via `docker compose up -d` and the app running):
+- [x] **Part 1 — the image.** Multi-stage `Dockerfile` + `.dockerignore`, and the one config change the app needed to run in a container.
+- [ ] **Part 2 — the stack.** Add the app to `docker-compose.yml`, health-gated startup order, Kafka reachable from both the host and other containers.
+- [ ] **Part 3 — polish.** `.env.example`, a full-stack smoke test, docs.
 
-```bash
-curl -X POST http://localhost:8080/api/v1/bookings -H "Content-Type: application/json" \
-  -d '{"userId":1,"seatIds":[1]}'
-```
+### Part 1: what's in it
 
-then check the application's own console output (not Kafka's) for a line like:
+- **`Dockerfile`, two stages.** *Build*: `maven:3.9-eclipse-temurin-21` compiles and packages the app, then splits the jar into Spring Boot's layers. *Runtime*: `eclipse-temurin:21-jre-alpine` — JRE only, no Maven, no compiler — receives just those layers. Only the runtime stage is the shipped image.
+- **Layered, so rebuilds are fast.** Dependencies, loader, snapshot dependencies and application code are separate image layers, ordered least to most volatile. A code-only change rebuilds a layer of a few hundred KB and reuses the cached dependency layer; the pom is copied and resolved *before* the source for the same reason.
+- **Runs as a non-root user** (`eventhub`, uid 1001).
+- **`HEALTHCHECK`** against `/actuator/health/liveness` (public, no token) using Alpine's built-in `wget`.
+- **Container-aware JVM** — heap sized as a percentage of the container's memory limit, and the JVM exits on `OutOfMemoryError` so an orchestrator can restart it.
+- **`.dockerignore`** keeps `target/`, `.git`, IDE files and any `.env` out of the build context.
+- **`DB_HOST`** added to `application.yml`. The database host used to be hardcoded to `localhost`; inside a container that is the app's own container, not Postgres. The default is unchanged, so running locally behaves exactly as before.
 
-```
-Mock email -> ahmed@example.com: your booking 1 for event 1 (1 seat(s), total 50.00) is confirmed
-```
-
-That log line, appearing without anything in `BookingServiceImpl` calling `NotificationListener` directly, is the actual thing this day proves.
-
-## What Day 14 adds
-
-The roadmap's own words for this day: "Add a mocked `PaymentService` → `PaymentProcessedEvent` → booking status update (PENDING → CONFIRMED)." Booking creation still leaves a booking in `PENDING`, exactly as before — what's new is that something now moves it out.
-
-- **`PaymentConsumer`** — a third independent consumer of `booking-confirmed-events` (own `groupId`: `payment-service`, alongside Day 13's `notification-service`), for the same reason both need their own group: neither should compete with the other for messages. Calls the mock `PaymentService`, then republishes the outcome as a `PaymentProcessedEvent` on a new `payment-processed-events` topic.
-- **`MockPaymentServiceImpl`** — the entire "charge a card" simulation: a comparison against a configurable threshold (`payment.mock.decline-threshold`, default `1000.00`), not a coin flip. Deterministic on purpose — a random mock would make every demo, log walk, and test run non-reproducible, the same reasoning behind Day 7's `CountDownLatch`-gated concurrency test instead of "just submit tasks and hope."
-- **`BookingStateMachine`** — formalizes the `BookingStatus` lifecycle that's existed since Day 2 as an unenforced enum. `PENDING → CONFIRMED`, `PENDING → FAILED`, and `PENDING`/`CONFIRMED → CANCELLED` are declared as legal; `FAILED` and `CANCELLED` are terminal. A same-status "transition" is treated as an idempotent no-op rather than an error — Kafka's at-least-once delivery means `PaymentProcessedListener` can see the same event twice, and a redelivery finding the booking already resolved shouldn't look like a bug.
-- **`PaymentProcessedListener`** — the consumer that actually matters: on `CONFIRMED`, seats move `RESERVED → BOOKED` (the sale is final); on `FAILED`, seats move back to `AVAILABLE` so someone else can book them instead of leaving them stuck behind a declined mock charge. Either way, `seat-availability` is evicted for the affected event — the same staleness bug Day 9 closed for booking creation would reopen here if payment resolution didn't evict too.
-- **`SeatAvailabilityCacheEvictor` extracted from `BookingServiceImpl`** — the exact key-enumeration logic Day 9 wrote as a private method now has two callers (`BookingServiceImpl` and `PaymentProcessedListener`); a shared bean means one definition of "every key this event's seats could be cached under," not two copies quietly drifting apart the next time `SeatStatus` gains a value.
-- **A second `@KafkaListener` container factory (`PaymentEventsConsumerConfig`)** — `application.yml`'s single global `spring.json.value.default.type` assumed exactly one event shape, true through Day 13 but no longer true once `PaymentProcessedEvent` existed. `PaymentProcessedListener` gets its own `ConsumerFactory` with its own default type rather than the two event types fighting over one shared property.
-- **`InvalidBookingStateTransitionException` → 409**, wired into `GlobalExceptionHandler` even though nothing HTTP-facing throws it yet — Day 16's planned booking-cancellation endpoint will call the same `BookingStateMachine.transition()`, and shouldn't need this mapping added retroactively when it does.
-
-**Try it** (with the stack up and the app running):
+### Try Part 1
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/events/1/seats -H "Content-Type: application/json" \
-  -d '{"seatNumber":"A5","section":"Floor","price":50.00}'
+# Build (first build downloads dependencies; later ones reuse the cache)
+docker build -t eventhub-booking-system:dev .
 
-curl -X POST http://localhost:8080/api/v1/bookings -H "Content-Type: application/json" \
-  -d '{"userId":1,"seatIds":[5]}'
+# See the size, and the layer split
+docker images eventhub-booking-system:dev
+docker history eventhub-booking-system:dev
+
+# Confirm it doesn't run as root
+docker run --rm --entrypoint id eventhub-booking-system:dev
+# uid=1001(eventhub) gid=1001(eventhub) ...
 ```
 
-then, a moment later:
+To actually start it today, bring up the infrastructure and point the container at it. On **Linux**, host networking lets the app's defaults (Postgres `5433`, Redis `6380`, Kafka `9094`) work unchanged:
 
 ```bash
-curl http://localhost:8080/api/v1/bookings/<id-from-above>
-# "status":"CONFIRMED" - PaymentProcessedListener moved it there off a Kafka message,
-# nothing in the curl request above asked for that directly.
+docker compose up -d
+docker run --rm --network host eventhub-booking-system:dev
+curl http://localhost:8080/actuator/health/liveness     # {"status":"UP"}
 ```
 
-## What Day 15 adds
-
-The roadmap's own words: "Retry policy + dead-letter queue for failed consumers. Integration tests for the full event chain (booking → payment event → notification event)." Two genuinely separate pieces of work, both closing gaps that were flagged explicitly in code since the day each consumer was written.
-
-- **`KafkaErrorHandlingConfig`** — one shared `CommonErrorHandler`: exponential backoff (500ms, doubling, capped at 5s between attempts, giving up after 10s cumulative), then a `DeadLetterPublishingRecoverer` republishes the failed message to `<topic>.DLT`. Wired in by replacing Spring Boot's auto-configured `kafkaListenerContainerFactory` bean outright (same bean name), which means `NotificationListener` and `PaymentConsumer` — neither of which names an explicit `containerFactory` — get retry + DLT with zero changes to either class. That's the actual point of putting the policy on the factory instead of inside each listener method.
-- **`PaymentProcessedListener` gets the identical policy too**, via its own already-existing dedicated factory (`PaymentEventsConsumerConfig`, needed since Day 14 for an unrelated deserialization-type reason) — updated in the same commit to attach the same `CommonErrorHandler` bean, so there's one definition of the policy, not two that could quietly drift apart.
-- **Two exceptions marked non-retryable**: `InvalidBookingStateTransitionException` and `ResourceNotFoundException`. Both represent a permanent, logic-level problem rather than a transient one — retrying either just delays reaching the same dead-letter outcome by 10 wasted seconds. Everything else gets the full backoff schedule before giving up.
-- **Two new topics, `booking-confirmed-events.DLT` and `payment-processed-events.DLT`**, declared explicitly in `KafkaTopicConfig` with the same partition count as the topics they shadow — `DeadLetterPublishingRecoverer`'s default destination resolver targets the same partition number on the DLT topic, so a mismatch would fail outright for messages from a higher-numbered partition.
-- **`EventChainIT`** — the integration test the roadmap names directly. Real Postgres and real Kafka (Testcontainers, `apache/kafka:3.8.0` — the same image and KRaft mode `docker-compose.yml` runs), a real Spring context, no mocked collaborators standing in for each other. Three scenarios: a booking whose mock payment succeeds resolves to `CONFIRMED` with the seat `BOOKED` and `NotificationListener` actually invoked; a booking priced over the mock decline threshold resolves to `FAILED` with the seat released back to `AVAILABLE`; and a `NotificationListener` forced to always throw gets retried more than once and its message ends up on `booking-confirmed-events.DLT` instead of silently vanishing.
-- **Awaitility, not `Thread.sleep`, for the asynchronous assertions** — every claim in `EventChainIT` is about state that becomes true on a Kafka consumer thread the test doesn't control ("the booking eventually reaches `CONFIRMED`"), not state that's already true when a method call returns. A sleep long enough to reliably pass is either flaky under load or slow on every single run; `await().untilAsserted(...)` expresses the actual condition being waited for.
-
-**Try it** (with the stack up and the app running):
-
-```bash
-curl -X POST http://localhost:8080/api/v1/events/1/seats -H "Content-Type: application/json" \
-  -d '{"seatNumber":"A6","section":"Floor","price":50.00}'
-
-curl -X POST http://localhost:8080/api/v1/bookings -H "Content-Type: application/json" \
-  -d '{"userId":1,"seatIds":[6]}'
-```
-
-Then simulate a failing consumer by stopping the app briefly, or watch the dead-letter topic directly after forcing a failure in a debugger:
-
-```bash
-docker exec eventhub-kafka /opt/kafka/bin/kafka-console-consumer.sh \
-  --bootstrap-server localhost:9092 --topic booking-confirmed-events.DLT --from-beginning
-```
-
-Nothing appears there under normal operation — that topic only ever receives a message once this day's retry policy has already tried and given up on it.
-
-## What Day 16 adds
-
-The roadmap's own words: "Minimal JWT auth ... users can only view/cancel their own bookings. Actuator `/health`, `/info`, `/metrics` exposed properly (not wide open — lock down in `application.yml`)." Several things this codebase had been explicitly deferring to today finally landed together.
-
-- **`auth` package** — `AuthController` (`POST /api/v1/auth/register`, `POST /api/v1/auth/login`), `AuthServiceImpl`, and the JWT machinery: `JwtService` (HS256 via jjwt: sign a token carrying email as `sub` and `userId` as a claim, verify it later), `JwtAuthenticationFilter` (reads `Authorization: Bearer ...` once per request and populates the `SecurityContext`), `UserPrincipal` / `EventHubUserDetailsService` (the bridge between `User` and Spring Security's `UserDetails`). This is a compact from-scratch implementation — the roadmap says to reuse Project 2's patterns, but that code isn't part of this repository, so it follows the same standard filter + `UserDetailsService` shape rather than copying anything.
-- **`SecurityConfig`** — stateless (`SessionCreationPolicy.STATELESS`), CSRF off (no session cookie for it to protect). Public: `/api/v1/auth/**`, `GET` on `/api/v1/events/**` and `/api/v1/venues/**` (browsing, including an event's seat availability), and `/actuator/health/**`. Everything else — creating/editing events or seats, every booking endpoint, `/actuator/info` and `/actuator/metrics/**` — needs a valid token.
-- **Booking ownership** — `BookingRequest` lost its `userId` field (its own Day 6 doc predicted this): the booking owner is now the authenticated principal, passed to `BookingService.create(userId, request)` explicitly. `getById` and the new `cancel` both call `requireOwnership` and throw `AccessDeniedException` (→ `403`) for someone else's booking.
-- **`POST /api/v1/bookings/{id}/cancel`** — the endpoint `BookingStateMachine`'s `PENDING → CANCELLED` / `CONFIRMED → CANCELLED` transitions were declared for back on Day 14. Releases the booking's seats to `AVAILABLE` and evicts the seat-availability cache, reusing Day 14's `SeatAvailabilityCacheEvictor`. Cancelling an already-`FAILED` or already-`CANCELLED` booking hits `InvalidBookingStateTransitionException` → `409`.
-- **Actuator** — `metrics` added to the exposed endpoints alongside `health` and `info`. "Exposed" and "reachable by anyone" are different things: only `/actuator/health/**` is permitted anonymously (infrastructure probes can't carry a token); `info` and `metrics` sit behind the same token as everything else.
-- **`JwtAuthenticationEntryPoint`** — a missing or invalid token is rejected inside Spring Security's filter chain, below Spring MVC, so `GlobalExceptionHandler` can never see it. Without this class that case would return a bare `401` with no body, breaking the one-error-shape promise; with it, the response is the same `ErrorResponse` JSON as every other error.
-- **`users.password_hash`** via `V4__add_user_password.sql`; the user-creation endpoint (`POST /api/v1/users`) and `UserRequest` are gone, since registration now lives in `auth` and is the only path that can set a password.
-
-**Try it** (with the stack up and the app running):
-
-```bash
-# 1. register (returns a token immediately) - or POST /api/v1/auth/login later
-curl -s -X POST http://localhost:8080/api/v1/auth/register -H "Content-Type: application/json" \
-  -d '{"fullName":"Sara","email":"sara@example.com","password":"correct-horse-battery"}'
-# {"token":"eyJ...","userId":1,"fullName":"Sara","email":"sara@example.com"}
-
-TOKEN=<paste the token from above>
-
-# 2. create seats (needs auth now) and book one - note: no userId in the body anymore
-curl -X POST http://localhost:8080/api/v1/events/1/seats -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" -d '{"seatNumber":"B1","section":"Floor","price":50.00}'
-
-curl -X POST http://localhost:8080/api/v1/bookings -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" -d '{"seatIds":[7]}'
-
-# 3. cancel it - the seat goes back to AVAILABLE
-curl -X POST http://localhost:8080/api/v1/bookings/<id>/cancel -H "Authorization: Bearer $TOKEN"
-
-# 4. the things that should fail
-curl -i http://localhost:8080/api/v1/bookings/<id>                     # 401 - no token
-curl -i http://localhost:8080/actuator/metrics                         # 401 - metrics are locked
-curl -i http://localhost:8080/actuator/health                          # 200 - probes stay open
-# register a second user, then GET the first user's booking with their token -> 403
-```
-
-## What Day 17 adds
-
-The roadmap's own words: "JSON structured logs (Logback encoder), correlation/request ID per request (filter + MDC). Log key lifecycle events: booking created, payment processed, notification sent." The interesting part is the second sentence's hidden requirement: those three lifecycle events don't happen on the same thread — a booking is created on an HTTP request thread, but payment and notification happen later on Kafka consumer threads that never saw the request. A correlation id that stops at the HTTP boundary would make the lifecycle logs useless for the one question they exist to answer ("what happened to *this* booking?"), so the id is carried across Kafka too.
-
-- **JSON logs by default** — `logstash-logback-encoder` + `logback-spring.xml`: one JSON object per line on stdout, with every MDC entry (`correlationId`, `userId`) and every structured argument (`bookingId`, `event`, …) as its own top-level field. Set `SPRING_PROFILES_ACTIVE=pretty` for plain, human-readable console output while developing.
-- **`CorrelationIdFilter`** (`common/logging`) — assigns each request an id (or accepts a safe caller-supplied `X-Correlation-Id`), puts it in the MDC, echoes it back in the response header, and clears it in a `finally`. It runs *ahead of* Spring Security, so even a `401` from a missing token has an id.
-- **`ErrorResponse` now carries `correlationId`** — the same id, in the error body, so a client that only shows the error JSON still hands you the one string that finds the request in the logs.
-- **`RequestLoggingFilter`** — one `http.request.completed` line per request: method, path, status, duration. No query string, no bodies (they carry tokens and passwords). Health probes at `DEBUG`, 5xx at `WARN`.
-- **`userId` in the MDC** — `JwtAuthenticationFilter` adds it once a token is validated, so every line an authenticated request writes says who it was for.
-- **The id crosses Kafka** — `CorrelationIdProducerInterceptor` (registered in `application.yml`) stamps the current MDC id onto every outgoing record as a header; `CorrelationIdRecordInterceptor` (attached to both listener container factories) restores it into the MDC before a listener runs. HTTP request → `booking-confirmed-events` → payment consumer → `payment-processed-events` → booking listener all log under one id.
-- **Lifecycle events**, each with a stable `event` field to query on:
-
-  | `event` | Logged by | Thread |
-  |---|---|---|
-  | `booking.created` | `BookingConfirmedEventPublisher` (after the transaction commits) | HTTP |
-  | `payment.processed` | `PaymentConsumer` | Kafka consumer |
-  | `notification.sent` | `NotificationListener` | Kafka consumer |
-  | `booking.status_changed` | `PaymentProcessedListener` (payment result) and `BookingServiceImpl.cancel` | Kafka consumer / HTTP |
-  | `http.request.completed` | `RequestLoggingFilter` | HTTP |
-
-- **Tests** — unit tests for both filters, both Kafka interceptors, `ErrorResponse`, and the MDC behavior of `JwtAuthenticationFilter` (all Docker-free); `BookingConcurrencyIT` gained real-HTTP checks (distinct ids across ten concurrent requests; a caller-supplied id echoed on an unauthenticated `401`); `EventChainIT` gained `correlationId_survivesEveryKafkaHopOfTheChain`, which reads the id off a record on the *second* topic — it can only be there if every earlier link worked.
-
-**Try it** (with the stack up and the app running; illustrative output — exact field order may differ):
-
-```bash
-# 1. Pick your own correlation id and watch it come back - header AND error body
-curl -i -H "X-Correlation-Id: demo-123" http://localhost:8080/api/v1/events/999
-# X-Correlation-Id: demo-123
-# {"timestamp":"...","status":404,...,"path":"/api/v1/events/999","correlationId":"demo-123","fieldErrors":null}
-
-# 2. Book a seat under a known id (TOKEN from the Day 16 register flow)
-curl -X POST http://localhost:8080/api/v1/bookings -H "Authorization: Bearer $TOKEN" \
-  -H "X-Correlation-Id: demo-booking-1" -H "Content-Type: application/json" -d '{"seatIds":[7]}'
-
-# 3. In the terminal running the app, everything that booking caused - across
-#    the HTTP thread AND the Kafka consumer threads - shares that one id:
-#    ... | grep '"correlationId":"demo-booking-1"'
-```
-
-Filtering the JSON stream for `demo-booking-1` should show, in roughly this order: `booking.created`, `http.request.completed`, `payment.processed`, `notification.sent`, `booking.status_changed` (`PENDING -> CONFIRMED`). One line, trimmed and pretty-printed for reading:
-
-```json
-{
-  "@timestamp": "2026-09-30T10:15:02.114Z",
-  "level": "INFO",
-  "logger_name": "com.ahdyahmed.eventhub.payment.PaymentConsumer",
-  "thread_name": "org.springframework.kafka.KafkaListenerEndpointContainer#1-0-C-1",
-  "message": "Payment SUCCEEDED for booking 12",
-  "service": "eventhub-booking-system",
-  "correlationId": "demo-booking-1",
-  "event": "payment.processed",
-  "paymentStatus": "SUCCEEDED",
-  "bookingId": 12,
-  "eventId": 1,
-  "amount": 50.00,
-  "reason": null
-}
-```
-
-Want it readable in a terminal instead? `SPRING_PROFILES_ACTIVE=pretty mvn spring-boot:run` prints, e.g. `10:15:02.114 INFO  [demo-booking-1] [user=-] c.a.e.payment.PaymentConsumer - Payment SUCCEEDED for booking 12`.
-
-**Known limits, named rather than hidden:**
-
-- The id lives in a thread-local, so it doesn't follow work handed to another thread pool (`@Async`, `CompletableFuture.supplyAsync`). This project doesn't do that today; the moment it does, that hand-off needs to copy the MDC explicitly.
-- The two "failed to publish" error lines in `BookingConfirmedEventPublisher` and `PaymentConsumer` run in a Kafka producer callback thread, so they carry `bookingId` in the message but not the `correlationId`. Join on `bookingId` (the `booking.created` line has both).
-- This is correlation, not distributed tracing: you can find everything one request caused, but there are no parent/child spans or per-hop timings. Micrometer Tracing / OpenTelemetry is the upgrade path if that's ever needed.
+Docker Desktop (macOS/Windows) doesn't support `--network host` the same way, and Kafka's advertised address (`localhost:9094`) isn't reachable from inside another container anyway. Making the full stack work on every platform is exactly what Part 2 is for — run the app locally with `mvn spring-boot:run` until then.
 
 ## Roadmap
 
@@ -745,7 +634,7 @@ Want it readable in a terminal instead? `SPRING_PROFILES_ACTIVE=pretty mvn sprin
 **Week 4 — Production readiness**
 - [x] Day 16 — JWT auth + booking ownership checks, Actuator hardening
 - [x] Day 17 — structured JSON logging with correlation IDs
-- [ ] Day 18 — multi-stage Dockerfile + full docker-compose stack (app + Postgres + Redis + Kafka)
+- [ ] Day 18 — multi-stage Dockerfile + full docker-compose stack (app + Postgres + Redis + Kafka) — *in progress: Part 1 of 3 (the image) done*
 - [ ] Day 19 — GitHub Actions CI (test + build on push)
 - [ ] Day 20 — GitHub Actions CD (build & push image)
 - [ ] Day 21 — load test under concurrency, fix findings
@@ -782,7 +671,7 @@ Want it readable in a terminal instead? `SPRING_PROFILES_ACTIVE=pretty mvn sprin
 - **A `RedisCacheManagerBuilderCustomizer` bean instead of hand-building a `RedisCacheManager`** — this hooks into the `RedisCacheManager` Spring Boot's autoconfiguration already builds from `application.yml` (connection factory, default TTL from `spring.cache.redis.time-to-live`) rather than replacing it outright, so the per-cache overrides are additive instead of a second, competing source of truth for the Redis connection itself.
 - **`GenericJackson2JsonRedisSerializer` for cache values, not the JDK's `SerializationPair.java()`** — Java serialization ties every cached value to the exact class bytecode that wrote it, which breaks the moment a DTO's fields change shape; JSON in Redis is also just readable with `redis-cli GET`, which matters for actually debugging this during development.
 - **`allEntries = true` on `event-search`, and on `SeatServiceImpl.create`'s `seat-availability` eviction** — `event-search` is keyed by an arbitrary filter/page combination the writer doesn't fully control, so there's no single key to compute precisely. A newly-created seat is a similar case: it could belong to any of the cached `(eventId, status)` listings for that event, so `SeatServiceImpl.create` also clears broadly rather than trying to guess which. Contrast this with `BookingServiceImpl`'s eviction of the same cache (Day 9): there, the key space actually is small and known, so that path evicts precisely instead — see the Day 9 bullet below for why the two paths make different choices for the same cache.
-- **The booking-vs-seat-cache gap was left in on Day 8, closed Day 9, not patched early** — `BookingServiceImpl` could have `@CacheEvict`'d seat availability from Day 8 onward; it deliberately didn't. This class of bug (a write in one service invalidating a cache another service reads) was worth its own day and its own commit rather than getting absorbed into "add caching" — see `BookingServiceImpl.evictSeatAvailabilityCache` and "What Day 9 adds" above for how it closed.
+- **The booking-vs-seat-cache gap was left in on Day 8, closed Day 9, not patched early** — `BookingServiceImpl` could have `@CacheEvict`'d seat availability from Day 8 onward; it deliberately didn't. This class of bug (a write in one service invalidating a cache another service reads) was worth its own day and its own commit rather than getting absorbed into "add caching" — see `BookingServiceImpl.evictSeatAvailabilityCache` for how it closed.
 - **`GenericJackson2JsonRedisSerializer` is built with an explicit `ObjectMapper`, not its own no-arg constructor** — the no-arg constructor's internal mapper doesn't register `jackson-datatype-jsr310`, which silently broke every cached `Instant` field. This only surfaced running against a real Redis, not in any unit test, because nothing in the unit test suite serializes through the cache layer at all — a gap worth naming, not just fixing.
 - **`DefaultTyping.EVERYTHING`, not `NON_FINAL`, for the cache's polymorphic type info** — every response DTO in this app is a `record`, which is implicitly `final`. `NON_FINAL` deliberately skips writing the `"@class"` type id for final classes, reasoning that the declared type is already unambiguous — true at the call site, but `RedisCache` reads everything back as plain `Object`, so the type id is the only thing telling Jackson what to reconstruct. `EVERYTHING` covers final classes too.
 - **`Stream.toList()` avoided for anything that will be cached, `Collectors.toCollection(ArrayList::new)` used instead** — `Stream.toList()`'s immutable, JDK-internal return type can't be reliably reconstructed by Jackson's polymorphic type-id mechanism once it's round-tripped through Redis as raw JSON. `PageResponse.from` wraps its content in `new ArrayList<>(...)` for the same reason, defensively, even though `Page.map()`'s current list type happens to work.
@@ -843,3 +732,10 @@ Want it readable in a terminal instead? `SPRING_PROFILES_ACTIVE=pretty mvn sprin
 - **`userId` is put in the MDC by `JwtAuthenticationFilter` but cleared by `CorrelationIdFilter`** — the access-log line is written *after* the security filter has returned, and needs the id still present. Making the outermost filter the single owner of request-scoped MDC cleanup keeps that ordering dependency in one documented place and prevents thread reuse from ever attributing one request's user to the next.
 - **The Spring banner is switched off** — with stdout now a stream of JSON events parsed line by line, the ASCII banner is the one thing Boot prints that isn't a log event, i.e. a guaranteed unparseable line at the top of every startup.
 - **Correlation IDs, not distributed tracing** — the roadmap asks for a request id via filter + MDC, and that answers "everything this one request caused, across threads and Kafka hops." It doesn't give parent/child spans or per-hop timings; Micrometer Tracing / OpenTelemetry is the upgrade path if that's ever needed. The thread-local approach also doesn't follow work handed to another thread pool — nothing here does that today, and it's named in the Day 17 section as a limit rather than left to be discovered.
+- **Multi-stage build: a Maven/JDK stage that's thrown away, a JRE-only stage that ships** — the compiler, Maven and the whole build cache never reach the runtime image. Smaller to pull and push (Day 20), and less in it to patch or attack. Alpine over a full Debian/Ubuntu base for the same reason; the one thing that costs is musl instead of glibc, which this dependency set (Postgres driver, Lettuce, Kafka client with no compression configured) doesn't care about.
+- **Spring Boot layers, one `COPY` each, least-volatile first** — a jar is one opaque ~70 MB blob that changes on every commit; the same content split into layers means a code change rewrites a few hundred KB and everything beneath it stays cached, for builds now and for registry pushes later. The pom is copied and its dependencies resolved *before* `src/`, for the same reason one level up.
+- **Tests are skipped in the image build, on purpose** — `-DskipTests` isn't cutting a corner: the `*IT` classes need Docker (Testcontainers) and there is no Docker daemon inside a build stage. Tests run in CI (Day 19), where a Docker daemon exists; an image build's job is to compile and package.
+- **Non-root runtime user** — if the app process is ever compromised, the attacker lands as an unprivileged user in the container rather than as root.
+- **`HEALTHCHECK` uses the liveness probe, not full health** — `/actuator/health/liveness` answers "is this process working?" and doesn't depend on Postgres or Redis; the full `/actuator/health` goes `DOWN` whenever a dependency is unreachable. "My database is restarting" shouldn't make the container declare *itself* dead. (Which dependencies the app should wait for at startup is a separate question, and is handled by `depends_on` health conditions in Part 2.)
+- **Heap sized from the container limit, JVM exits on OOM** — `MaxRAMPercentage` follows whatever memory limit the container is given instead of assuming the whole host, leaving room for metaspace and thread stacks; `ExitOnOutOfMemoryError` turns a half-dead JVM that still answers health checks into a clean restart. The flags go through `JAVA_OPTS` and a shell-form `exec java ...` entrypoint rather than `JAVA_TOOL_OPTIONS`, because the JVM announces `JAVA_TOOL_OPTIONS` on stderr with a non-JSON line — exactly what Day 17's JSON-only log stream shouldn't contain. `exec` makes java PID 1 so `docker stop`'s SIGTERM reaches Spring Boot and it shuts down gracefully.
+- **`DB_HOST` is a new environment variable, with the old value as its default** — "localhost" is correct on a developer machine and wrong inside a container, where Postgres is a different container reached by its compose service name. Redis and Kafka were already configurable by host; the database was the one that wasn't. The default means nothing changes for local runs.
