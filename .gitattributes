@@ -6,6 +6,7 @@
 # Scripts that must run on Linux (containers, CI) keep LF even on Windows checkouts.
 *.sh text eol=lf
 *.ps1 text eol=lf
+*.yml text eol=lf
 mvnw text eol=lf
 Dockerfile text eol=lf
 

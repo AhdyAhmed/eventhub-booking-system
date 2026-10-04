@@ -1,8 +1,10 @@
 # EventHub — Booking & Order Processing System
 
+[![CI](https://github.com/ahdyahmed/eventhub-booking-system/actions/workflows/ci.yml/badge.svg)](https://github.com/ahdyahmed/eventhub-booking-system/actions/workflows/ci.yml)
+
 A production-grade event/ticket booking system demonstrating optimistic locking under concurrency, Redis caching, and event-driven order processing in Spring Boot. This is Project 3 of a 3-project backend portfolio (Core REST API → Auth & Authorization → **Production-grade Booking/Order System**).
 
-**Status:** ✅ Day 18 complete — `docker compose up --build` runs the app, Postgres, Redis and Kafka with health-gated startup; configuration is documented in `.env.example`, and the full booking flow has a repeatable smoke test. CI, CD, and load testing follow (see [Roadmap](#roadmap) below).
+**Status:** ✅ Day 19 complete — GitHub Actions now runs the full unit and Testcontainers integration suite, builds the executable JAR on every push and pull request, and publishes test/build artifacts. CD and load testing follow (see [Roadmap](#roadmap) below).
 
 ---
 
@@ -22,7 +24,7 @@ A production-grade event/ticket booking system demonstrating optimistic locking 
 | Testing                  | JUnit 5, Mockito, Testcontainers (Postgres, Kafka), Awaitility |
 | Build                     | Maven                                       |
 | Containerization           | Docker / Docker Compose                     |
-| CI                          | GitHub Actions (from Day 19)                |
+| CI                          | GitHub Actions: Java 21, Maven cache, Testcontainers, build artifacts (Day 19) |
 
 ## Prerequisites
 
@@ -424,6 +426,7 @@ Dockerfile                   # Day 18 - multi-stage build: Maven build stage -> 
 docker-compose.yml           # Day 18 - the full stack: app + Postgres + Redis + Kafka, health-gated startup
 .env.example                 # Day 18 - safe, committed template for local Compose configuration
 scripts/smoke-test.ps1       # Day 18 - end-to-end register -> book -> pay -> cancel verification
+.github/workflows/ci.yml     # Day 19 - test + build on every push and pull request
 LICENSE                      # MIT
 pom.xml
 
@@ -664,6 +667,16 @@ Things to know:
 - **Kafka instead of the roadmap's default RabbitMQ suggestion:** keyed messages give per-booking ordering, while independent consumer groups and explicit retry/DLT behavior demonstrate the event-stream semantics this project needs. The extra broker configuration is intentional, not an accidental queue replacement.
 - **After-commit publishing is not a transactional outbox:** consumers never see a rolled-back booking, but there is still a small crash window between the database commit and Kafka acknowledgement. A production version would write an outbox row in the booking transaction and publish/retry it separately; the current roadmap treats that extra infrastructure as a stretch goal.
 
+## What Day 19 adds
+
+The CI workflow at `.github/workflows/ci.yml` runs for every push and pull request, with a manual trigger available for troubleshooting:
+
+- **One authoritative Maven gate:** `mvn --batch-mode --no-transfer-progress verify` compiles the project, runs the unit suite, starts real Postgres/Redis/Kafka containers for all `*IT` tests, and packages the executable Spring Boot JAR only when those checks pass.
+- **Java 21 on Ubuntu:** Eclipse Temurin matches the project's declared runtime, while the GitHub-hosted runner supplies Docker for Testcontainers.
+- **Dependency caching and concurrency control:** Maven dependencies are cached from `pom.xml`; a newer run on the same branch cancels an obsolete in-progress run.
+- **Useful artifacts:** Surefire/Failsafe reports are retained for seven days even when CI fails, and a successful executable JAR is retained for fourteen days.
+- **Least-privilege token access:** the workflow only requests read access to repository contents and does not require secrets.
+
 ## Roadmap
 
 **Week 1 — Foundation & domain**
@@ -691,7 +704,7 @@ Things to know:
 - [x] Day 16 — JWT auth + booking ownership checks, Actuator hardening
 - [x] Day 17 — structured JSON logging with correlation IDs
 - [x] Day 18 — multi-stage Dockerfile + full docker-compose stack (app + Postgres + Redis + Kafka), environment template, and end-to-end smoke test
-- [ ] Day 19 — GitHub Actions CI (test + build on push)
+- [x] Day 19 — GitHub Actions CI (unit + Testcontainers integration tests, build artifacts, and README badge)
 - [ ] Day 20 — GitHub Actions CD (build & push image)
 - [ ] Day 21 — load test under concurrency, fix findings
 - [ ] Day 22 — architecture diagram + design decisions section
