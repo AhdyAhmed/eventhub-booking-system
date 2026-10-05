@@ -1,9 +1,7 @@
 package com.ahdyahmed.eventhub.config;
 
-import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
-import com.fasterxml.jackson.databind.jsontype.BasicPolymorphicTypeValidator;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import java.time.Duration;
 import java.util.Map;
@@ -62,7 +60,7 @@ public class CacheConfig implements CachingConfigurer {
     public RedisCacheManagerBuilderCustomizer redisCacheManagerBuilderCustomizer() {
         RedisSerializationContext.SerializationPair<Object> valueSerializer =
                 RedisSerializationContext.SerializationPair.fromSerializer(
-                        new GenericJackson2JsonRedisSerializer(redisObjectMapper()));
+                        redisSerializer());
 
         Map<String, RedisCacheConfiguration> perCacheConfig = Map.of(
                 "events", cacheConfig(valueSerializer, Duration.ofMinutes(5)),
@@ -83,8 +81,8 @@ public class CacheConfig implements CachingConfigurer {
      * default"}. Building the mapper explicitly and registering {@link
      * JavaTimeModule} on it fixes that.
      *
-     * <p>{@code DefaultTyping.EVERYTHING}, not {@code NON_FINAL}, is
-     * required here — every DTO in this app ({@code EventResponse}, {@code
+     * <p>The serializer's default typing is required here — every DTO in
+     * this app ({@code EventResponse}, {@code
      * SeatResponse}, ...) is a Java {@code record}, and records are
      * implicitly {@code final}. {@code NON_FINAL} skips writing the {@code
      * "@class"} type-id property for final classes on the assumption that
@@ -94,15 +92,14 @@ public class CacheConfig implements CachingConfigurer {
      * know which concrete class to reconstruct — the exact {@code "missing
      * type id property '@class'"} failure this caused on read.</p>
      */
-    private ObjectMapper redisObjectMapper() {
+    private GenericJackson2JsonRedisSerializer redisSerializer() {
         ObjectMapper mapper = new ObjectMapper();
         mapper.registerModule(new JavaTimeModule());
         mapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
-        mapper.activateDefaultTyping(
-                BasicPolymorphicTypeValidator.builder().allowIfSubType(Object.class).build(),
-                ObjectMapper.DefaultTyping.EVERYTHING,
-                JsonTypeInfo.As.PROPERTY);
-        return mapper;
+        return GenericJackson2JsonRedisSerializer.builder()
+                .objectMapper(mapper)
+                .defaultTyping(true)
+                .build();
     }
 
     private RedisCacheConfiguration cacheConfig(

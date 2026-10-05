@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.ahdyahmed.eventhub.auth.JwtService;
 import com.ahdyahmed.eventhub.auth.UserPrincipal;
 import com.ahdyahmed.eventhub.common.logging.CorrelationId;
+import com.ahdyahmed.eventhub.booking.event.BookingConfirmedEventPublisher;
 import com.ahdyahmed.eventhub.event.Event;
 import com.ahdyahmed.eventhub.event.EventRepository;
 import com.ahdyahmed.eventhub.seat.Seat;
@@ -30,6 +31,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.http.HttpEntity;
@@ -85,6 +87,12 @@ import org.testcontainers.containers.PostgreSQLContainer;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class BookingConcurrencyIT {
 
+    @MockBean
+    private BookingConfirmedEventPublisher bookingConfirmedEventPublisher;
+
+    @MockBean
+    private SeatAvailabilityCacheEvictor seatAvailabilityCacheEvictor;
+
     private static final int CONCURRENT_ATTEMPTS = 10;
 
     static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine")
@@ -107,6 +115,12 @@ class BookingConcurrencyIT {
         registry.add("spring.datasource.url", postgres::getJdbcUrl);
         registry.add("spring.datasource.username", postgres::getUsername);
         registry.add("spring.datasource.password", postgres::getPassword);
+        // Kafka is outside this test's concurrency boundary. Prevent the
+        // full Spring context from reaching for a developer-machine broker;
+        // EventChainIT owns the real Kafka integration coverage.
+        registry.add("spring.kafka.admin.auto-create", () -> false);
+        registry.add("spring.kafka.listener.auto-startup", () -> false);
+        registry.add("spring.kafka.producer.properties.max.block.ms", () -> 1_000);
     }
 
     @LocalServerPort
@@ -156,7 +170,8 @@ class BookingConcurrencyIT {
         contestedSeatId = seat.getId();
 
         User user = userRepository.save(
-                User.builder().fullName("Race Tester").email("race-tester@example.com")
+                User.builder().fullName("Race Tester")
+                        .email("race-tester-" + contestedSeatId + "@example.com")
                         .passwordHash("test-password-hash").build()
         );
         bearerToken = jwtService.generateToken(new UserPrincipal(user));

@@ -7,6 +7,7 @@ import static org.mockito.Mockito.verify;
 
 import com.ahdyahmed.eventhub.booking.BookingService;
 import com.ahdyahmed.eventhub.booking.dto.BookingRequest;
+import com.ahdyahmed.eventhub.booking.event.BookingConfirmedEventPublisher;
 import com.ahdyahmed.eventhub.event.EventRepository;
 import com.ahdyahmed.eventhub.event.EventService;
 import com.ahdyahmed.eventhub.event.dto.EventRequest;
@@ -30,6 +31,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.boot.test.mock.mockito.SpyBean;
 import org.springframework.cache.CacheManager;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -66,6 +68,9 @@ import org.testcontainers.containers.PostgreSQLContainer;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
 class RedisCacheIT {
 
+    @MockBean
+    private BookingConfirmedEventPublisher bookingConfirmedEventPublisher;
+
     static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine")
             .withDatabaseName("eventhub_db")
             .withUsername("eventhub_user")
@@ -93,6 +98,11 @@ class RedisCacheIT {
         registry.add("spring.datasource.password", postgres::getPassword);
         registry.add("spring.data.redis.host", redis::getHost);
         registry.add("spring.data.redis.port", () -> redis.getMappedPort(6379));
+        // This test isolates cache behavior; the event-chain suite is the
+        // one responsible for starting and verifying a real Kafka broker.
+        registry.add("spring.kafka.admin.auto-create", () -> false);
+        registry.add("spring.kafka.listener.auto-startup", () -> false);
+        registry.add("spring.kafka.producer.properties.max.block.ms", () -> 1_000);
     }
 
     @Autowired

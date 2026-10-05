@@ -4,7 +4,7 @@
 
 A production-grade event/ticket booking system demonstrating optimistic locking under concurrency, Redis caching, and event-driven order processing in Spring Boot. This is Project 3 of a 3-project backend portfolio (Core REST API → Auth & Authorization → **Production-grade Booking/Order System**).
 
-**Status:** ✅ Day 19 complete — GitHub Actions now runs the full unit and Testcontainers integration suite, builds the executable JAR on every push and pull request, and publishes test/build artifacts. CD and load testing follow (see [Roadmap](#roadmap) below).
+**Status:** ✅ Day 20 complete — every push and pull request runs the full CI suite; a successful push to the repository's default branch also builds and publishes the tested Docker image to GitHub Container Registry. Load testing follows (see [Roadmap](#roadmap) below).
 
 ---
 
@@ -25,6 +25,7 @@ A production-grade event/ticket booking system demonstrating optimistic locking 
 | Build                     | Maven                                       |
 | Containerization           | Docker / Docker Compose                     |
 | CI                          | GitHub Actions: Java 21, Maven cache, Testcontainers, build artifacts (Day 19) |
+| CD                          | GitHub Actions + Docker Buildx → GitHub Container Registry (Day 20) |
 
 ## Prerequisites
 
@@ -73,18 +74,19 @@ SPRING_PROFILES_ACTIVE=pretty mvn spring-boot:run
 mvn test
 ```
 
-Runs the fast suite: plain JUnit 5 + Mockito unit tests (no Docker needed) plus `EventhubApplicationTests`, which uses Testcontainers to boot the full Spring context against a real, disposable Postgres — so Docker must be running for that one to pass.
+Runs the fast suite: plain JUnit 5 + Mockito unit tests (no Docker needed) plus `EventhubApplicationTests`, which uses Testcontainers to boot the full Spring context against disposable Postgres, Redis, and Kafka instances — so Docker must be running for that one to pass.
 
 ```bash
 mvn verify
 ```
 
-Also runs the two slower Testcontainers-backed integration tests, kept out of the fast `mvn test` path via Maven Failsafe (which handles `*IT` classes) rather than Surefire (which handles `*Test`/`*Tests`) — see the `pom.xml` comment on the `maven-failsafe-plugin` block for why:
+Also runs the three slower Testcontainers-backed integration tests, kept out of the `mvn test` path via Maven Failsafe (which handles `*IT` classes) rather than Surefire (which handles `*Test`/`*Tests`) — see the `pom.xml` comment on the `maven-failsafe-plugin` block for why:
 
 - **`BookingConcurrencyIT`** — fires real concurrent HTTP requests at the app to prove the optimistic-locking behavior added Day 6/7 actually holds under a real race, not just in a mocked unit test.
 - **`RedisCacheIT`** (Day 10) — a real Postgres *and* a real Redis, both via Testcontainers, proving the cache-aside behavior added Days 8–9: hit/miss (a second call to a `@Cacheable` method doesn't reach the database), and eviction-on-write (an update or a booking is reflected on the very next read, not after a TTL).
+- **`EventChainIT`** (Day 15) — real Postgres and Kafka containers prove the complete booking → payment → notification flow, including retry and dead-letter handling.
 
-Both need Docker running to pass; `mvn verify` takes noticeably longer than `mvn test` as a result — two separate sets of containers spin up and tear down.
+All three need Docker running to pass; `mvn verify` takes noticeably longer than `mvn test` as a result because each integration boundary starts disposable infrastructure.
 
 ## Configuration
 
@@ -319,8 +321,8 @@ curl http://localhost:8080/api/v1/events/1   # updated name comes back immediate
 **7. Full test suite**
 
 ```bash
-mvn test      # fast: unit tests + EventhubApplicationTests (Testcontainers Postgres)
-mvn verify    # adds BookingConcurrencyIT - slower, needs Docker
+mvn test      # unit tests + full-context Testcontainers smoke test
+mvn verify    # adds all three *IT integration suites - slower, needs Docker
 ```
 
 **8. Cache invalidation on booking (Day 9)** — a fresh seat, so the cache starts clean:
@@ -426,7 +428,7 @@ Dockerfile                   # Day 18 - multi-stage build: Maven build stage -> 
 docker-compose.yml           # Day 18 - the full stack: app + Postgres + Redis + Kafka, health-gated startup
 .env.example                 # Day 18 - safe, committed template for local Compose configuration
 scripts/smoke-test.ps1       # Day 18 - end-to-end register -> book -> pay -> cancel verification
-.github/workflows/ci.yml     # Day 19 - test + build on every push and pull request
+.github/workflows/ci.yml     # Days 19-20 - CI on every change; publish tested image on the default branch
 LICENSE                      # MIT
 pom.xml
 
@@ -677,6 +679,23 @@ The CI workflow at `.github/workflows/ci.yml` runs for every push and pull reque
 - **Useful artifacts:** Surefire/Failsafe reports are retained for seven days even when CI fails, and a successful executable JAR is retained for fourteen days.
 - **Least-privilege token access:** the workflow only requests read access to repository contents and does not require secrets.
 
+## What Day 20 adds
+
+The same CI workflow now has a dependent `publish-image` job. It runs only for a direct push to the repository's default branch and only after the complete `test-and-build` job succeeds, so pull requests and failing revisions can never publish an image.
+
+- **GitHub Container Registry:** images are published as `ghcr.io/<owner>/<repository>` using the built-in `GITHUB_TOKEN`; no personal access token or repository secret is required.
+- **Traceable tags:** every publication receives `latest`, the default-branch name, and an immutable `sha-<full-commit-sha>` tag. Docker metadata also adds standard OCI source, revision, and creation labels.
+- **Fast rebuilds:** Docker Buildx persists build layers in GitHub Actions cache, complementing the layered Dockerfile so unchanged Maven dependencies are reused.
+- **Least privilege:** only the publishing job receives `packages: write`; the test job and pull-request runs retain read-only access.
+
+After the first successful default-branch run, use the published image with the existing stack (authenticate with `docker login ghcr.io` first if the package is private):
+
+```powershell
+$env:APP_IMAGE = "ghcr.io/<owner>/<repository>:latest"
+docker compose pull app
+docker compose up -d --no-build
+```
+
 ## Roadmap
 
 **Week 1 — Foundation & domain**
@@ -705,7 +724,7 @@ The CI workflow at `.github/workflows/ci.yml` runs for every push and pull reque
 - [x] Day 17 — structured JSON logging with correlation IDs
 - [x] Day 18 — multi-stage Dockerfile + full docker-compose stack (app + Postgres + Redis + Kafka), environment template, and end-to-end smoke test
 - [x] Day 19 — GitHub Actions CI (unit + Testcontainers integration tests, build artifacts, and README badge)
-- [ ] Day 20 — GitHub Actions CD (build & push image)
+- [x] Day 20 — GitHub Actions CD (publish the tested Docker image to GHCR on the default branch)
 - [ ] Day 21 — load test under concurrency, fix findings
 - [ ] Day 22 — architecture diagram + design decisions section
 - [ ] Day 23 — OpenAPI/Swagger polish + demo seed data

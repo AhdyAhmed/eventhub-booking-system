@@ -41,6 +41,7 @@ import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.common.header.Header;
+import org.apache.kafka.common.serialization.StringDeserializer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -53,6 +54,7 @@ import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
 import org.springframework.kafka.test.utils.KafkaTestUtils;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.kafka.KafkaContainer;
 import org.testcontainers.utility.DockerImageName;
@@ -104,14 +106,19 @@ class EventChainIT {
     // a Zookeeper-based setup that would behave differently under the hood.
     static final KafkaContainer kafka = new KafkaContainer(DockerImageName.parse("apache/kafka:3.8.0"));
 
+    static final GenericContainer<?> redis = new GenericContainer<>("redis:7-alpine")
+            .withExposedPorts(6379);
+
     @BeforeAll
     static void startContainers() {
         postgres.start();
         kafka.start();
+        redis.start();
     }
 
     @AfterAll
     static void stopContainers() {
+        redis.stop();
         kafka.stop();
         postgres.stop();
     }
@@ -122,6 +129,8 @@ class EventChainIT {
         registry.add("spring.datasource.username", postgres::getUsername);
         registry.add("spring.datasource.password", postgres::getPassword);
         registry.add("spring.kafka.bootstrap-servers", kafka::getBootstrapServers);
+        registry.add("spring.data.redis.host", redis::getHost);
+        registry.add("spring.data.redis.port", () -> redis.getMappedPort(6379));
     }
 
     @Autowired
@@ -150,7 +159,7 @@ class EventChainIT {
     @BeforeEach
     void setUp() {
         User user = userRepository.save(
-                User.builder().fullName("Chain Tester").email("chain-tester@example.com")
+                User.builder().fullName("Chain Tester").email("chain-tester-" + System.nanoTime() + "@example.com")
                         .passwordHash("test-password-hash").build());
         userId = user.getId();
         // Each test method shares one Spring context (and so one spy) -
@@ -305,6 +314,7 @@ class EventChainIT {
 
     private Consumer<String, String> topicReader(String groupId) {
         Map<String, Object> props = KafkaTestUtils.consumerProps(kafka.getBootstrapServers(), groupId, "true");
-        return new DefaultKafkaConsumerFactory<String, String>(props).createConsumer();
+        return new DefaultKafkaConsumerFactory<>(props, new StringDeserializer(), new StringDeserializer())
+                .createConsumer();
     }
 }

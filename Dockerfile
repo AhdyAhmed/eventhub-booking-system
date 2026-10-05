@@ -35,7 +35,8 @@ RUN --mount=type=cache,target=/root/.m2 mvn -B -ntp package -DskipTests
 # spring-boot-loader / snapshot-dependencies / application), ordered from
 # least to most likely to change. Extracted here, copied layer by layer in
 # the runtime stage below.
-RUN java -Djarmode=layertools -jar target/eventhub-booking-system.jar extract --destination target/extracted
+RUN java -Djarmode=tools -jar target/eventhub-booking-system.jar extract \
+    --layers --launcher --destination target/extracted
 
 # ---------------------------------------------------------------------------
 # Stage 2: runtime
