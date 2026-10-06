@@ -68,7 +68,12 @@ public class CacheConfig implements CachingConfigurer {
                 "seat-availability", cacheConfig(valueSerializer, Duration.ofSeconds(30))
         );
 
-        return builder -> builder.withInitialCacheConfigurations(perCacheConfig);
+        // Day 21: expose real hit/miss counters through Actuator so the load
+        // test can prove reads are served by Redis, not merely that the
+        // cache-enabled endpoints keep returning 200 responses under load.
+        return builder -> builder
+                .enableStatistics()
+                .withInitialCacheConfigurations(perCacheConfig);
     }
 
     /**

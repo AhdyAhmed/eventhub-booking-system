@@ -4,7 +4,7 @@
 
 A production-grade event/ticket booking system demonstrating optimistic locking under concurrency, Redis caching, and event-driven order processing in Spring Boot. This is Project 3 of a 3-project backend portfolio (Core REST API → Auth & Authorization → **Production-grade Booking/Order System**).
 
-**Status:** ✅ Day 20 complete — every push and pull request runs the full CI suite; a successful push to the repository's default branch also builds and publishes the tested Docker image to GitHub Container Registry. Load testing follows (see [Roadmap](#roadmap) below).
+**Status:** ✅ Day 21 complete — concurrent load testing against the real Docker stack proves one winner per seat, clean conflict handling, Kafka payment settlement, and measured Redis cache hits under load. Architecture documentation follows (see [Roadmap](#roadmap) below).
 
 ---
 
@@ -26,13 +26,14 @@ A production-grade event/ticket booking system demonstrating optimistic locking 
 | Containerization           | Docker / Docker Compose                     |
 | CI                          | GitHub Actions: Java 21, Maven cache, Testcontainers, build artifacts (Day 19) |
 | CD                          | GitHub Actions + Docker Buildx → GitHub Container Registry (Day 20) |
+| Load testing                | Repeatable concurrent PowerShell harness against the real Compose stack (Day 21) |
 
 ## Prerequisites
 
 - Java 21 (JDK)
 - Maven 3.9+
 - Docker + Docker Compose
-- PowerShell 5.1+ (only for the full-stack smoke test)
+- PowerShell 7+ (for the full-stack smoke and concurrent load-test scripts)
 
 ## Running locally
 
@@ -428,6 +429,7 @@ Dockerfile                   # Day 18 - multi-stage build: Maven build stage -> 
 docker-compose.yml           # Day 18 - the full stack: app + Postgres + Redis + Kafka, health-gated startup
 .env.example                 # Day 18 - safe, committed template for local Compose configuration
 scripts/smoke-test.ps1       # Day 18 - end-to-end register -> book -> pay -> cancel verification
+scripts/load-test.ps1        # Day 21 - concurrent booking races + measured Redis-backed reads
 .github/workflows/ci.yml     # Days 19-20 - CI on every change; publish tested image on the default branch
 LICENSE                      # MIT
 pom.xml
@@ -696,6 +698,30 @@ docker compose pull app
 docker compose up -d --no-build
 ```
 
+## What Day 21 adds
+
+`scripts/load-test.ps1` drives the real Compose stack through the public HTTP API. Each run creates isolated data, so it is safe to repeat against persistent local volumes.
+
+- **Booking contention:** creates a configurable set of seats and races multiple authenticated booking requests for each one. Every seat must produce exactly one HTTP `201` winner and `N-1` HTTP `409` conflicts—any 500, timeout, duplicate winner, or missing winner fails the run.
+- **Event-chain settlement:** every winning booking must become `CONFIRMED` through the real Kafka payment flow before the timeout, and every corresponding seat must finish `BOOKED`.
+- **Cache load and correctness:** warms the event and seat-list keys, issues concurrent reads, rejects any non-200 response or stale seat state, and verifies the Actuator `cache.gets` counters recorded the expected Redis hits.
+- **Finding fixed:** Redis cache statistics were disabled, leaving Actuator's cache counters at zero even while Redis contained live keys. `CacheConfig` now enables statistics, making cache behavior observable and testable under load.
+
+Run the default profile after the stack is healthy:
+
+```powershell
+docker compose up -d --build
+.\scripts\load-test.ps1
+```
+
+Increase the pressure without editing the script:
+
+```powershell
+.\scripts\load-test.ps1 -SeatCount 40 -ContendersPerSeat 10 -ReadRequests 1000 -TimeoutSeconds 120
+```
+
+Verified locally on October 2, 2026, the heavier profile completed 400 booking attempts with exactly 40 winners and 360 conflicts, settled all 40 bookings, then served 1,000 cached reads with zero failures and exactly 500 measured hits in each Redis cache. Throughput is machine-dependent; correctness counts are the acceptance criteria.
+
 ## Roadmap
 
 **Week 1 — Foundation & domain**
@@ -725,7 +751,7 @@ docker compose up -d --no-build
 - [x] Day 18 — multi-stage Dockerfile + full docker-compose stack (app + Postgres + Redis + Kafka), environment template, and end-to-end smoke test
 - [x] Day 19 — GitHub Actions CI (unit + Testcontainers integration tests, build artifacts, and README badge)
 - [x] Day 20 — GitHub Actions CD (publish the tested Docker image to GHCR on the default branch)
-- [ ] Day 21 — load test under concurrency, fix findings
+- [x] Day 21 — real-stack concurrent load test, Redis hit metrics, and verified locking/cache correctness
 - [ ] Day 22 — architecture diagram + design decisions section
 - [ ] Day 23 — OpenAPI/Swagger polish + demo seed data
 - [ ] Day 24 — final polish, `v1.0` tag
