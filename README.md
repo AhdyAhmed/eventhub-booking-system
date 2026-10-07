@@ -4,7 +4,7 @@
 
 A production-grade event/ticket booking system demonstrating optimistic locking under concurrency, Redis caching, and event-driven order processing in Spring Boot. This is Project 3 of a 3-project backend portfolio (Core REST API → Auth & Authorization → **Production-grade Booking/Order System**).
 
-**Status:** ✅ Day 21 complete — concurrent load testing against the real Docker stack proves one winner per seat, clean conflict handling, Kafka payment settlement, and measured Redis cache hits under load. Architecture documentation follows (see [Roadmap](#roadmap) below).
+**Status:** ✅ Day 22 complete — the tested system now has an editable four-page architecture diagram and an explicit record of its design decisions, trade-offs, and known production gaps (see [Architecture](#architecture) and [Roadmap](#roadmap)).
 
 ---
 
@@ -27,6 +27,7 @@ A production-grade event/ticket booking system demonstrating optimistic locking 
 | CI                          | GitHub Actions: Java 21, Maven cache, Testcontainers, build artifacts (Day 19) |
 | CD                          | GitHub Actions + Docker Buildx → GitHub Container Registry (Day 20) |
 | Load testing                | Repeatable concurrent PowerShell harness against the real Compose stack (Day 21) |
+| Architecture docs           | Four-page diagrams.net source + GitHub-rendered overview (Day 22) |
 
 ## Prerequisites
 
@@ -430,6 +431,7 @@ docker-compose.yml           # Day 18 - the full stack: app + Postgres + Redis +
 .env.example                 # Day 18 - safe, committed template for local Compose configuration
 scripts/smoke-test.ps1       # Day 18 - end-to-end register -> book -> pay -> cancel verification
 scripts/load-test.ps1        # Day 21 - concurrent booking races + measured Redis-backed reads
+docs/architecture.drawio     # Day 22 - editable request, event, cache, and Docker network diagrams
 .github/workflows/ci.yml     # Days 19-20 - CI on every change; publish tested image on the default branch
 LICENSE                      # MIT
 pom.xml
@@ -666,11 +668,6 @@ Things to know:
 - **Infra only:** `docker compose up -d postgres redis kafka` starts just the dependencies, for the original run-the-app-from-your-IDE workflow; the host-mapped ports are unchanged.
 - **Existing Kafka volume:** if you started the old single-listener Kafka earlier, its data volume is reused and works with the new listeners. If anything looks stuck, `docker compose down -v` gives a clean slate.
 
-### Current design trade-offs
-
-- **Kafka instead of the roadmap's default RabbitMQ suggestion:** keyed messages give per-booking ordering, while independent consumer groups and explicit retry/DLT behavior demonstrate the event-stream semantics this project needs. The extra broker configuration is intentional, not an accidental queue replacement.
-- **After-commit publishing is not a transactional outbox:** consumers never see a rolled-back booking, but there is still a small crash window between the database commit and Kafka acknowledgement. A production version would write an outbox row in the booking transaction and publish/retry it separately; the current roadmap treats that extra infrastructure as a stretch goal.
-
 ## What Day 19 adds
 
 The CI workflow at `.github/workflows/ci.yml` runs for every push and pull request, with a manual trigger available for troubleshooting:
@@ -722,6 +719,54 @@ Increase the pressure without editing the script:
 
 Verified locally on October 2, 2026, the heavier profile completed 400 booking attempts with exactly 40 winners and 360 conflicts, settled all 40 bookings, then served 1,000 cached reads with zero failures and exactly 500 measured hits in each Redis cache. Throughput is machine-dependent; correctness counts are the acceptance criteria.
 
+## What Day 22 adds
+
+- **One editable architecture artifact:** [`docs/architecture.drawio`](docs/architecture.drawio) contains four named diagrams—request flow, event flow, cache layer, and Docker network—and opens directly in [diagrams.net](https://app.diagrams.net/).
+- **One repository overview:** the diagram below keeps the system's major synchronous and asynchronous boundaries visible on GitHub without requiring a diagram editor.
+- **An explicit decision record:** the choices behind Kafka, optimistic locking, Redis, transaction-bound publishing, the modular monolith, JWT, Flyway, and deterministic payments are documented with both benefits and costs.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Client[HTTP client] --> Correlation[Correlation ID filter]
+    Correlation --> Security[JWT security filter chain]
+    Security --> Controller[REST controllers]
+    Controller --> Service[Feature services]
+
+    Service -->|authoritative reads and writes| Postgres[(PostgreSQL 16)]
+    Service -->|cache-aside reads and eviction| Redis[(Redis 7)]
+    Service -->|after DB commit| BookingTopic[[booking-confirmed-events]]
+
+    BookingTopic -->|payment-service group| Payment[Mock payment consumer]
+    BookingTopic -->|notification-service group| Notification[Notification consumer]
+    Payment --> PaymentTopic[[payment-processed-events]]
+    PaymentTopic -->|booking-service group| Settlement[Booking settlement listener]
+    Settlement -->|status and seat state| Postgres
+    Settlement -->|evict availability| Redis
+
+    BookingTopic -. exhausted retries .-> BookingDLT[[booking-confirmed-events.DLT]]
+    PaymentTopic -. exhausted retries .-> PaymentDLT[[payment-processed-events.DLT]]
+```
+
+The application is a feature-oriented Spring Boot modular monolith. HTTP requests pass through correlation and security filters before reaching controller → service → repository slices. PostgreSQL remains authoritative; Redis accelerates read-heavy views only. A successful booking is published to Kafka after the database transaction commits, then independent consumer groups process payment and notification work. Payment results drive the final booking/seat state and invalidate availability caches. The correlation ID travels from the incoming HTTP header through Kafka record headers, so the whole chain can be traced in structured logs.
+
+In Docker Compose, `app` waits for healthy `postgres`, `redis`, and `kafka` services and reaches them over Compose DNS at `postgres:5432`, `redis:6379`, and `kafka:29092`. Host tools use the published ports `5433`, `6380`, and `9094`; clients reach the API on `8080`. Kafka's separate internal and external advertised listeners make both network paths valid.
+
+## Design decisions & trade-offs
+
+| Decision | Why this project chose it | Cost, risk, or production follow-up |
+|----------|---------------------------|-------------------------------------|
+| **Kafka instead of the roadmap's suggested RabbitMQ** | Booking-keyed records preserve per-booking partition order, while separate consumer groups let payment and notification each receive every booking event. Kafka also makes replay, retry topics, and stream-oriented integration visible in the portfolio. | A single-broker local Kafka stack is heavier and more complex than RabbitMQ, and replication factor `1` is not production-durable. Production would run a multi-broker secured cluster with replication and monitoring. |
+| **Optimistic locking for seats** | Most seat reads are uncontended, so `@Version` prevents double booking without holding database locks across requests. Losing racers receive a deliberate `409 Conflict`. | Under extreme contention, callers may see more conflicts and need retry/backoff or a waiting-room strategy. The current behavior favors correctness and simple failure semantics over queueing every contender. |
+| **Redis cache-aside with targeted eviction** | PostgreSQL stays the source of truth while event/search/availability reads avoid repeated database work. Per-cache TTLs match volatility, and booking, cancellation, event, seat, and payment writes evict affected entries. | Cache invalidation adds complexity and short stale windows remain possible if a process dies between the database write and eviction. Redis failures should degrade to database reads; production would also alert on error-handler activity and hit-rate changes. |
+| **Publish `BookingConfirmedEvent` after commit, without an outbox** | `AFTER_COMMIT` prevents consumers from observing a booking that later rolls back and keeps the learning project compact. | This is **not atomic** with Kafka publication: a crash after the database commit but before broker acknowledgement can lose the event. Production should write an outbox row in the booking transaction, then publish it with retries and idempotent consumers. |
+| **Feature-oriented modular monolith** | One deployable keeps local setup, ACID booking writes, debugging, and CI approachable while feature packages still enforce clear boundaries. | Components cannot scale or deploy independently. If payment or notification load diverges, their consumers are natural extraction points—but that requires versioned contracts and operational ownership. |
+| **Stateless HS256 JWT authentication** | The API remains horizontally scalable without server-side sessions, and booking ownership is enforced from the authenticated user identity rather than a request-supplied user ID. | Tokens cannot be revoked individually before expiry, and a shared signing secret broadens blast radius. Production should use short lifetimes, secret rotation or asymmetric signing, and a revocation/refresh strategy. |
+| **Flyway owns the schema; Hibernate validates it** | Versioned SQL makes database changes reviewable and repeatable, while `ddl-auto: validate` catches entity/schema drift without silently mutating production data. | Every schema change needs an explicit forward migration and rollback/roll-forward plan. This is extra work compared with automatic DDL, but avoids uncontrolled changes. |
+| **Deterministic mock payment threshold** | Identical inputs always produce identical outcomes, which keeps tests, demos, retries, and load runs reproducible. | It does not model gateway latency, timeouts, webhooks, fraud checks, or idempotency keys. A real adapter would need those behaviors plus secure credential and PCI-boundary handling. |
+| **At-least-once consumers with retry and DLT** | Transient failures retry with exponential backoff; exhausted records remain inspectable instead of disappearing. Booking settlement also treats redelivery of an already-applied state as a no-op. | DLT records require monitoring and a controlled replay process. Side effects such as a real email provider would also need explicit idempotency to prevent duplicates. |
+
 ## Roadmap
 
 **Week 1 — Foundation & domain**
@@ -752,7 +797,7 @@ Verified locally on October 2, 2026, the heavier profile completed 400 booking a
 - [x] Day 19 — GitHub Actions CI (unit + Testcontainers integration tests, build artifacts, and README badge)
 - [x] Day 20 — GitHub Actions CD (publish the tested Docker image to GHCR on the default branch)
 - [x] Day 21 — real-stack concurrent load test, Redis hit metrics, and verified locking/cache correctness
-- [ ] Day 22 — architecture diagram + design decisions section
+- [x] Day 22 — editable request/event/cache/Docker architecture diagrams + design decisions and trade-offs
 - [ ] Day 23 — OpenAPI/Swagger polish + demo seed data
 - [ ] Day 24 — final polish, `v1.0` tag
 
