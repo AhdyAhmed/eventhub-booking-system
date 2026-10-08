@@ -1,5 +1,6 @@
 package com.ahdyahmed.eventhub.booking.dto;
 
+import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 import java.util.List;
@@ -14,7 +15,9 @@ import java.util.List;
  * passes it to {@code BookingService.create} as an explicit parameter - not
  * something a request body field, trusted or not, needs to carry anymore.
  */
+@Schema(description = "Seat IDs to reserve atomically for the authenticated user")
 public record BookingRequest(
+        @Schema(example = "[1, 2]")
         @NotEmpty(message = "seatIds must contain at least one seat")
         List<@NotNull(message = "seatIds must not contain null values") Long> seatIds
 ) {

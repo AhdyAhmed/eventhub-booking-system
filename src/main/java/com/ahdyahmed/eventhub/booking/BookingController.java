@@ -3,6 +3,10 @@ package com.ahdyahmed.eventhub.booking;
 import com.ahdyahmed.eventhub.auth.UserPrincipal;
 import com.ahdyahmed.eventhub.booking.dto.BookingRequest;
 import com.ahdyahmed.eventhub.booking.dto.BookingResponse;
+import com.ahdyahmed.eventhub.config.OpenApiConfig;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import java.net.URI;
 import lombok.RequiredArgsConstructor;
@@ -28,11 +32,14 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/api/v1/bookings")
 @RequiredArgsConstructor
+@Tag(name = "Bookings", description = "Concurrency-safe seat reservation and owner-only booking access")
+@SecurityRequirement(name = OpenApiConfig.BEARER_JWT)
 public class BookingController {
 
     private final BookingService bookingService;
 
     @PostMapping
+    @Operation(summary = "Create a booking", description = "Atomically reserves every requested seat or returns 409 without a partial booking.")
     public ResponseEntity<BookingResponse> create(@AuthenticationPrincipal UserPrincipal principal,
                                                    @Valid @RequestBody BookingRequest request) {
         BookingResponse response = bookingService.create(principal.getId(), request);
@@ -40,6 +47,7 @@ public class BookingController {
     }
 
     @GetMapping("/{id}")
+    @Operation(summary = "Get your booking")
     public BookingResponse getById(@AuthenticationPrincipal UserPrincipal principal, @PathVariable Long id) {
         return bookingService.getById(id, principal.getId());
     }
@@ -52,6 +60,7 @@ public class BookingController {
      * a resource.
      */
     @PostMapping("/{id}/cancel")
+    @Operation(summary = "Cancel your booking", description = "Transitions the booking to CANCELLED and releases its seats.")
     public BookingResponse cancel(@AuthenticationPrincipal UserPrincipal principal, @PathVariable Long id) {
         return bookingService.cancel(id, principal.getId());
     }

@@ -94,6 +94,20 @@ spring:
       # for why each @KafkaListener sets its own instead of sharing one
       # default.
 
+# Day 23: conventional, discoverable URLs plus a useful first-open Swagger
+# experience. Persisting authorization is browser-local; the application
+# remains stateless and validates the bearer token on every request.
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method
+    tags-sorter: alpha
+    try-it-out-enabled: true
+    persist-authorization: true
+    disable-swagger-default-url: true
+
 # Day 14: threshold the mock PaymentService declines above. Deliberately a
 # plain config value, not a random chance - see MockPaymentServiceImpl's
 # class doc for why determinism was chosen over simulating real-world

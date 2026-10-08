@@ -1,9 +1,13 @@
 package com.ahdyahmed.eventhub.event;
 
 import com.ahdyahmed.eventhub.common.dto.PageResponse;
+import com.ahdyahmed.eventhub.config.OpenApiConfig;
 import com.ahdyahmed.eventhub.event.dto.EventRequest;
 import com.ahdyahmed.eventhub.event.dto.EventResponse;
 import com.ahdyahmed.eventhub.event.dto.EventSearchCriteria;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import java.net.URI;
 import java.time.Instant;
@@ -25,17 +29,20 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/api/v1/events")
 @RequiredArgsConstructor
+@Tag(name = "Events", description = "Public event discovery and authenticated event management")
 public class EventController {
 
     private final EventService eventService;
 
     @PostMapping
+    @Operation(summary = "Create an event", security = @SecurityRequirement(name = OpenApiConfig.BEARER_JWT))
     public ResponseEntity<EventResponse> create(@Valid @RequestBody EventRequest request) {
         EventResponse response = eventService.create(request);
         return ResponseEntity.created(URI.create("/api/v1/events/" + response.id())).body(response);
     }
 
     @GetMapping("/{id}")
+    @Operation(summary = "Get an event", description = "Public, Redis-cached event detail lookup.")
     public EventResponse getById(@PathVariable Long id) {
         return eventService.getById(id);
     }
@@ -47,6 +54,7 @@ public class EventController {
      * query param, e.g. {@code ?sort=eventDate,asc&sort=category,asc}.
      */
     @GetMapping
+    @Operation(summary = "Search events", description = "Public paginated search by venue, city, category, date range, and sort order.")
     public PageResponse<EventResponse> search(
             @RequestParam(required = false) Long venueId,
             @RequestParam(required = false) String city,
@@ -60,11 +68,13 @@ public class EventController {
     }
 
     @PutMapping("/{id}")
+    @Operation(summary = "Update an event", security = @SecurityRequirement(name = OpenApiConfig.BEARER_JWT))
     public EventResponse update(@PathVariable Long id, @Valid @RequestBody EventRequest request) {
         return eventService.update(id, request);
     }
 
     @DeleteMapping("/{id}")
+    @Operation(summary = "Delete an event", security = @SecurityRequirement(name = OpenApiConfig.BEARER_JWT))
     public ResponseEntity<Void> delete(@PathVariable Long id) {
         eventService.delete(id);
         return ResponseEntity.noContent().build();

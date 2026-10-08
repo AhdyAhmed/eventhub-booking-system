@@ -50,6 +50,17 @@
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
 
+        <!--
+            Day 23: OpenAPI 3 generation plus the interactive Swagger UI.
+            Springdoc's compatibility matrix maps Spring Boot 3.3.x to its
+            2.6.x line, so this is deliberately pinned to 2.6.0.
+        -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+            <version>2.6.0</version>
+        </dependency>
+
         <!-- Auth (Day 16): JWT, reusing Spring Security rather than hand-rolling filter/session logic -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

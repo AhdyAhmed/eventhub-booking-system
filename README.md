@@ -4,7 +4,7 @@
 
 A production-grade event/ticket booking system demonstrating optimistic locking under concurrency, Redis caching, and event-driven order processing in Spring Boot. This is Project 3 of a 3-project backend portfolio (Core REST API → Auth & Authorization → **Production-grade Booking/Order System**).
 
-**Status:** ✅ Day 22 complete — the tested system now has an editable four-page architecture diagram and an explicit record of its design decisions, trade-offs, and known production gaps (see [Architecture](#architecture) and [Roadmap](#roadmap)).
+**Status:** ✅ Day 23 complete — the API is explorable through polished OpenAPI/Swagger documentation, and an idempotent opt-in seed script creates a recruiter-ready event catalog (see [Interactive API documentation](#interactive-api-documentation) and [Roadmap](#roadmap)).
 
 ---
 
@@ -28,6 +28,7 @@ A production-grade event/ticket booking system demonstrating optimistic locking 
 | CD                          | GitHub Actions + Docker Buildx → GitHub Container Registry (Day 20) |
 | Load testing                | Repeatable concurrent PowerShell harness against the real Compose stack (Day 21) |
 | Architecture docs           | Four-page diagrams.net source + GitHub-rendered overview (Day 22) |
+| API documentation           | OpenAPI 3 + interactive Swagger UI via springdoc (Day 23) |
 
 ## Prerequisites
 
@@ -44,6 +45,7 @@ A production-grade event/ticket booking system demonstrating optimistic locking 
 cp .env.example .env       # optional: review/customize local values first
 docker compose up --build
 curl http://localhost:8080/actuator/health/liveness
+./scripts/seed-demo.ps1       # PowerShell: optional, idempotent demo catalog
 ```
 
 On Windows PowerShell, use `Copy-Item .env.example .env` instead of `cp`.
@@ -139,6 +141,19 @@ Copy `.env.example` to `.env` to customize the Compose stack. The application an
 "No" means the endpoint is reachable without a token (public browsing, or the two endpoints whose whole job is to hand one out); everything marked "Yes" needs `Authorization: Bearer <token>` from `/api/v1/auth/login` or `/api/v1/auth/register`, or a `401` comes back instead. See [Authenticated flow](#authenticated-flow-register-book-cancel) for a runnable example and [SecurityConfig](#project-structure)'s own reasoning for exactly where that line sits.
 
 Every `POST`/`PUT` body is validated (`@Valid`); every error response — validation failure, not-found, conflict, unauthorized, forbidden, or unexpected — comes back in the one shape `ErrorResponse` defines. See [Usage examples](#usage-examples) for what each looks like.
+
+## Interactive API documentation
+
+With the application running, open [http://localhost:8080/swagger-ui.html](http://localhost:8080/swagger-ui.html). The raw OpenAPI descriptions are also available at [JSON](http://localhost:8080/v3/api-docs) and [YAML](http://localhost:8080/v3/api-docs.yaml) endpoints. All three documentation routes are public so a first-time evaluator can discover the API before obtaining a token.
+
+Swagger groups operations by feature and marks protected operations with a lock. To exercise the full flow:
+
+1. Run `POST /api/v1/auth/register` (or `login`) and copy the returned `token`.
+2. Select **Authorize**, paste the token only—Swagger adds `Bearer` automatically—and submit.
+3. Browse the seeded events, choose an available seat, and run `POST /api/v1/bookings` with its ID.
+4. Poll `GET /api/v1/bookings/{id}` to see Kafka-driven payment move the booking from `PENDING` to `CONFIRMED`.
+
+The UI remembers authorization in that browser until it is cleared. This is a Swagger convenience only; the server still validates the JWT independently on every protected request.
 
 **Correlation IDs (Day 17):** every response — success or error — carries an `X-Correlation-Id` header, and every error body repeats it as `correlationId`. Send your own `X-Correlation-Id` (letters, digits, `.`, `_`, `-`, up to 64 characters) and it's reused; anything else is replaced with a generated UUID. It's the string to quote when reporting a problem, and the one to search the logs for.
 
@@ -431,6 +446,8 @@ docker-compose.yml           # Day 18 - the full stack: app + Postgres + Redis +
 .env.example                 # Day 18 - safe, committed template for local Compose configuration
 scripts/smoke-test.ps1       # Day 18 - end-to-end register -> book -> pay -> cancel verification
 scripts/load-test.ps1        # Day 21 - concurrent booking races + measured Redis-backed reads
+scripts/seed-demo.ps1        # Day 23 - idempotent, opt-in seed runner for the Compose database
+scripts/demo-data.sql        # Day 23 - two venues, three future events, and 24 available seats
 docs/architecture.drawio     # Day 22 - editable request, event, cache, and Docker network diagrams
 .github/workflows/ci.yml     # Days 19-20 - CI on every change; publish tested image on the default branch
 LICENSE                      # MIT
@@ -554,6 +571,7 @@ src/main/java/com/ahdyahmed/eventhub/
     ├── KafkaTopicConfig.java             # topic topology (Day 11), now 4 topics (2 + their DLTs)
     ├── PaymentEventsConsumerConfig.java  # Day 14 - dedicated consumer factory for PaymentProcessedEvent
     ├── KafkaErrorHandlingConfig.java     # Day 15 - shared retry + dead-letter-topic policy
+    ├── OpenApiConfig.java                # Day 23 - API metadata + Swagger JWT authorization scheme
     └── SecurityConfig.java               # Day 16 - stateless JWT filter chain, public vs. protected routes
 
 src/main/resources/
@@ -767,6 +785,23 @@ In Docker Compose, `app` waits for healthy `postgres`, `redis`, and `kafka` serv
 | **Deterministic mock payment threshold** | Identical inputs always produce identical outcomes, which keeps tests, demos, retries, and load runs reproducible. | It does not model gateway latency, timeouts, webhooks, fraud checks, or idempotency keys. A real adapter would need those behaviors plus secure credential and PCI-boundary handling. |
 | **At-least-once consumers with retry and DLT** | Transient failures retry with exponential backoff; exhausted records remain inspectable instead of disappearing. Booking settlement also treats redelivery of an already-applied state as a no-op. | DLT records require monitoring and a controlled replay process. Side effects such as a real email provider would also need explicit idempotency to prevent duplicates. |
 
+## What Day 23 adds
+
+- **Interactive OpenAPI 3 documentation:** springdoc exposes `/swagger-ui.html`, `/v3/api-docs`, and `/v3/api-docs.yaml`. Feature tags and operation summaries make the API scan-friendly, while protected operations reference the documented `bearer-jwt` security scheme.
+- **A working authorization flow:** documentation routes stay public; register/login remain the token entry points; Swagger's **Authorize** control supplies JWTs to protected venue, event, seat, booking, and user operations.
+- **Opt-in demo data:** `scripts/seed-demo.ps1` executes `scripts/demo-data.sql` inside the running Postgres container. It creates two venues, three future-dated events, and 24 seats, then clears only EventHub's catalog cache keys so results are visible immediately.
+- **Safe repeatability:** the SQL reuses its named records and upserts seats, so running it again refreshes dates and details without duplicating the catalog. It is deliberately separate from Flyway so demo records are never injected into an environment simply because the application starts.
+
+Run the full recruiter-ready demo setup:
+
+```powershell
+docker compose up -d --build
+./scripts/seed-demo.ps1
+Start-Process http://localhost:8080/swagger-ui.html
+```
+
+The seed script prints the generated event IDs and dates. Event dates move forward on every run, keeping the public "upcoming events" search useful instead of allowing static sample data to expire.
+
 ## Roadmap
 
 **Week 1 — Foundation & domain**
@@ -798,7 +833,7 @@ In Docker Compose, `app` waits for healthy `postgres`, `redis`, and `kafka` serv
 - [x] Day 20 — GitHub Actions CD (publish the tested Docker image to GHCR on the default branch)
 - [x] Day 21 — real-stack concurrent load test, Redis hit metrics, and verified locking/cache correctness
 - [x] Day 22 — editable request/event/cache/Docker architecture diagrams + design decisions and trade-offs
-- [ ] Day 23 — OpenAPI/Swagger polish + demo seed data
+- [x] Day 23 — polished OpenAPI/Swagger UI + idempotent opt-in demo catalog
 - [ ] Day 24 — final polish, `v1.0` tag
 
 ## License

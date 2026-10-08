@@ -37,7 +37,10 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
  * /api/v1/venues/**} — a ticketing site's whole point is that you can look
  * before you log in), registration and login are public by necessity, and
  * {@code /actuator/health/**} stays public for infrastructure liveness/
- * readiness probes that have no way to carry a bearer token. Everything
+ * readiness probes that have no way to carry a bearer token. Day 23 also
+ * leaves the generated OpenAPI description and Swagger UI public so a new
+ * evaluator can discover the API and obtain a token without already having
+ * one. Everything
  * else — creating/updating/deleting events or seats, every booking
  * endpoint, {@code /actuator/info} and {@code /actuator/metrics/**} — needs
  * a valid token. That last part is this day's other roadmap line: actuator
@@ -83,6 +86,7 @@ public class SecurityConfig {
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/api/v1/auth/**").permitAll()
                         .requestMatchers("/actuator/health/**").permitAll()
+                        .requestMatchers("/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/v1/events/**", "/api/v1/venues/**").permitAll()
                         .anyRequest().authenticated())
                 .exceptionHandling(ex -> ex.authenticationEntryPoint(authenticationEntryPoint))
