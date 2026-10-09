@@ -1,840 +1,244 @@
-# EventHub — Booking & Order Processing System
+# EventHub — Ticket Booking & Order Processing
 
 [![CI](https://github.com/ahdyahmed/eventhub-booking-system/actions/workflows/ci.yml/badge.svg)](https://github.com/ahdyahmed/eventhub-booking-system/actions/workflows/ci.yml)
 
-A production-grade event/ticket booking system demonstrating optimistic locking under concurrency, Redis caching, and event-driven order processing in Spring Boot. This is Project 3 of a 3-project backend portfolio (Core REST API → Auth & Authorization → **Production-grade Booking/Order System**).
-
-**Status:** ✅ Day 23 complete — the API is explorable through polished OpenAPI/Swagger documentation, and an idempotent opt-in seed script creates a recruiter-ready event catalog (see [Interactive API documentation](#interactive-api-documentation) and [Roadmap](#roadmap)).
-
----
-
-## Tech stack
-
-| Concern            | Choice                                   |
-|---------------------|-------------------------------------------|
-| Language / runtime   | Java 21                                   |
-| Framework            | Spring Boot 3.3.4 (Web, Data JPA, Validation, Actuator) |
-| Database              | PostgreSQL 16                              |
-| Migrations             | Flyway                                     |
-| Caching                | Redis (cache-aside, from Day 8)            |
-| Messaging               | Apache Kafka (KRaft mode, from Day 11)     |
-| Auth                     | Spring Security + stateless JWT (HS256, jjwt), from Day 16 |
-| Logging                   | SLF4J/Logback, JSON via `logstash-logback-encoder`, MDC correlation IDs (from Day 17) |
-| Container                 | Multi-stage Docker build, JRE-only Alpine runtime image, non-root (Day 18) |
-| Testing                  | JUnit 5, Mockito, Testcontainers (Postgres, Kafka), Awaitility |
-| Build                     | Maven                                       |
-| Containerization           | Docker / Docker Compose                     |
-| CI                          | GitHub Actions: Java 21, Maven cache, Testcontainers, build artifacts (Day 19) |
-| CD                          | GitHub Actions + Docker Buildx → GitHub Container Registry (Day 20) |
-| Load testing                | Repeatable concurrent PowerShell harness against the real Compose stack (Day 21) |
-| Architecture docs           | Four-page diagrams.net source + GitHub-rendered overview (Day 22) |
-| API documentation           | OpenAPI 3 + interactive Swagger UI via springdoc (Day 23) |
-
-## Prerequisites
-
-- Java 21 (JDK)
-- Maven 3.9+
-- Docker + Docker Compose
-- PowerShell 7+ (for the full-stack smoke and concurrent load-test scripts)
-
-## Running locally
-
-**Everything in containers** (the app too — the Docker image is built from the `Dockerfile`):
-
-```bash
-cp .env.example .env       # optional: review/customize local values first
-docker compose up --build
-curl http://localhost:8080/actuator/health/liveness
-./scripts/seed-demo.ps1       # PowerShell: optional, idempotent demo catalog
-```
-
-On Windows PowerShell, use `Copy-Item .env.example .env` instead of `cp`.
-
-**Or: dependencies in containers, app from your IDE/terminal** (faster edit-run cycle):
-
-1. Start Postgres + Redis + Kafka only:
-   ```bash
-   docker compose up -d postgres redis kafka
-   ```
-2. Run the app (stop the `app` container first if it's running — both want port 8080):
-   ```bash
-   mvn spring-boot:run
-   ```
-3. Confirm it's healthy:
-   ```bash
-   curl http://localhost:8080/actuator/health
-   ```
-   Expected: `{"status":"UP"}`
-
-Logs are one JSON object per line by default (structured, with a correlation ID on every line). For readable plain-text output while developing:
-
-```bash
-SPRING_PROFILES_ACTIVE=pretty mvn spring-boot:run
-```
-
-## Running the tests
-
-```bash
-mvn test
-```
-
-Runs the fast suite: plain JUnit 5 + Mockito unit tests (no Docker needed) plus `EventhubApplicationTests`, which uses Testcontainers to boot the full Spring context against disposable Postgres, Redis, and Kafka instances — so Docker must be running for that one to pass.
-
-```bash
-mvn verify
-```
-
-Also runs the three slower Testcontainers-backed integration tests, kept out of the `mvn test` path via Maven Failsafe (which handles `*IT` classes) rather than Surefire (which handles `*Test`/`*Tests`) — see the `pom.xml` comment on the `maven-failsafe-plugin` block for why:
-
-- **`BookingConcurrencyIT`** — fires real concurrent HTTP requests at the app to prove the optimistic-locking behavior added Day 6/7 actually holds under a real race, not just in a mocked unit test.
-- **`RedisCacheIT`** (Day 10) — a real Postgres *and* a real Redis, both via Testcontainers, proving the cache-aside behavior added Days 8–9: hit/miss (a second call to a `@Cacheable` method doesn't reach the database), and eviction-on-write (an update or a booking is reflected on the very next read, not after a TTL).
-- **`EventChainIT`** (Day 15) — real Postgres and Kafka containers prove the complete booking → payment → notification flow, including retry and dead-letter handling.
-
-All three need Docker running to pass; `mvn verify` takes noticeably longer than `mvn test` as a result because each integration boundary starts disposable infrastructure.
-
-## Configuration
-
-Copy `.env.example` to `.env` to customize the Compose stack. The application and Compose settings are overridable via environment variables, with sane local defaults baked in:
-
-| Variable       | Default          | Notes                                   |
-|-----------------|-------------------|------------------------------------------|
-| `DB_PORT`         | `5433`             | Matches the host port in `docker-compose.yml` |
-| `DB_NAME`           | `eventhub_db`        |                                            |
-| `DB_USER`             | `eventhub_user`        |                                            |
-| `DB_PASSWORD`           | `eventhub_pass`          | Local dev only — never used as-is in a real deployment |
-| `REDIS_HOST`              | `localhost`                |                                            |
-| `REDIS_PORT`                | `6380`                        | Matches the host port in `docker-compose.yml` |
-| `KAFKA_BOOTSTRAP_SERVERS`     | `localhost:9094`                | Host-side address: the published port `9094` (not Kafka's usual `9092`, to avoid clashing with a local broker). Inside compose the app uses `kafka:29092` instead |
-| `KAFKA_HOST_PORT`             | `9094`                          | Compose host port for Kafka's external listener |
-| `SERVER_PORT`             | `8080`                    |                                            |
-| `JWT_SECRET`                | a local-dev placeholder      | **Must** be overridden in any real deployment — the default is committed to source control. Needs 32+ bytes for HS256 |
-| `JWT_EXPIRATION_MS`           | `3600000` (1 hour)             | Token lifetime                              |
-| `PAYMENT_MOCK_DECLINE_THRESHOLD` | `1000.00`                    | Mock payments at or above this total are declined |
-| `DB_HOST`                      | `localhost`                      | Postgres host. Added Day 18: inside a container this is the Postgres service's name, not `localhost` |
-| `SPRING_PROFILES_ACTIVE`        | *(unset)*                        | Unset = JSON logs. `pretty` = plain-text, human-readable console logs (Day 17) |
-| `APP_IMAGE`                     | `eventhub-booking-system:dev`    | Compose image name/tag |
-| `APP_MEMORY_LIMIT`              | `1g`                             | Compose memory limit used by container-aware JVM sizing |
-
-## API reference
-
-| Method | Path                               | Auth required | Purpose                                              |
-|--------|-------------------------------------|:---:|-------------------------------------------------------|
-| POST   | `/api/v1/auth/register`              | No | Create a user + password, get a token back              |
-| POST   | `/api/v1/auth/login`                  | No | Exchange email + password for a token                   |
-| POST   | `/api/v1/venues`                     | Yes | Create a venue                                         |
-| GET    | `/api/v1/venues`                      | No | List all venues                                         |
-| GET    | `/api/v1/venues/{id}`                  | No | Get one venue                                            |
-| PUT    | `/api/v1/venues/{id}`                   | Yes | Update a venue                                            |
-| DELETE | `/api/v1/venues/{id}`                    | Yes | Delete a venue                                             |
-| POST   | `/api/v1/events`                          | Yes | Create an event (by `venueId`)                              |
-| GET    | `/api/v1/events`                           | No | Paginated, filterable, sortable event search — see [Usage examples](#usage-examples) |
-| GET    | `/api/v1/events/{id}`                       | No | Get one event                                                |
-| PUT    | `/api/v1/events/{id}`                        | Yes | Update an event                                               |
-| DELETE | `/api/v1/events/{id}`                         | Yes | Delete an event                                                |
-| GET    | `/api/v1/users/{id}`                            | Yes | Get one user                                                     |
-| POST   | `/api/v1/events/{eventId}/seats`                 | Yes | Add a seat to an event                                            |
-| GET    | `/api/v1/events/{eventId}/seats`                  | No | List an event's seats, optional `?status=` filter                 |
-| POST   | `/api/v1/bookings`                                 | Yes | Create a booking — reserves one or more seats, for the authenticated caller |
-| GET    | `/api/v1/bookings/{id}`                             | Yes | Get one booking — 403 if it isn't yours                             |
-| POST   | `/api/v1/bookings/{id}/cancel`                       | Yes | Cancel your own booking, releasing its seats             |
-
-"No" means the endpoint is reachable without a token (public browsing, or the two endpoints whose whole job is to hand one out); everything marked "Yes" needs `Authorization: Bearer <token>` from `/api/v1/auth/login` or `/api/v1/auth/register`, or a `401` comes back instead. See [Authenticated flow](#authenticated-flow-register-book-cancel) for a runnable example and [SecurityConfig](#project-structure)'s own reasoning for exactly where that line sits.
-
-Every `POST`/`PUT` body is validated (`@Valid`); every error response — validation failure, not-found, conflict, unauthorized, forbidden, or unexpected — comes back in the one shape `ErrorResponse` defines. See [Usage examples](#usage-examples) for what each looks like.
-
-## Interactive API documentation
-
-With the application running, open [http://localhost:8080/swagger-ui.html](http://localhost:8080/swagger-ui.html). The raw OpenAPI descriptions are also available at [JSON](http://localhost:8080/v3/api-docs) and [YAML](http://localhost:8080/v3/api-docs.yaml) endpoints. All three documentation routes are public so a first-time evaluator can discover the API before obtaining a token.
-
-Swagger groups operations by feature and marks protected operations with a lock. To exercise the full flow:
-
-1. Run `POST /api/v1/auth/register` (or `login`) and copy the returned `token`.
-2. Select **Authorize**, paste the token only—Swagger adds `Bearer` automatically—and submit.
-3. Browse the seeded events, choose an available seat, and run `POST /api/v1/bookings` with its ID.
-4. Poll `GET /api/v1/bookings/{id}` to see Kafka-driven payment move the booking from `PENDING` to `CONFIRMED`.
-
-The UI remembers authorization in that browser until it is cleared. This is a Swagger convenience only; the server still validates the JWT independently on every protected request.
-
-**Correlation IDs (Day 17):** every response — success or error — carries an `X-Correlation-Id` header, and every error body repeats it as `correlationId`. Send your own `X-Correlation-Id` (letters, digits, `.`, `_`, `-`, up to 64 characters) and it's reused; anything else is replaced with a generated UUID. It's the string to quote when reporting a problem, and the one to search the logs for.
-
-**A note on the historical walkthrough below:** the numbered Day 1–15 walkthrough records how the system was built and predates authentication, so its mutation commands are not a current smoke test. Use the [Authenticated flow](#authenticated-flow-register-book-cancel) for runnable register → login → book → cancel commands against this version.
-
-## Usage examples
-
-**Full happy path — register → venue → event → seat → booking:**
-
-```bash
-curl -X POST http://localhost:8080/api/v1/auth/register -H "Content-Type: application/json" \
-  -d '{"fullName":"Ahmed Test","email":"ahmed@example.com","password":"correct-horse-battery"}'
-TOKEN=<paste-the-token-from-the-response>
-
-curl -X POST http://localhost:8080/api/v1/venues -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $TOKEN" \
-  -d '{"name":"Cairo Arena","city":"Cairo","address":"Nasr City","capacity":5000}'
-
-curl -X POST http://localhost:8080/api/v1/events -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $TOKEN" \
-  -d '{"venueId":1,"name":"Launch Night","description":"Opening event","category":"CONCERT","eventDate":"2026-12-01T19:00:00Z"}'
-
-curl -X POST http://localhost:8080/api/v1/events/1/seats -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $TOKEN" \
-  -d '{"seatNumber":"A1","section":"Floor","price":50.00}'
-
-curl -X POST http://localhost:8080/api/v1/bookings -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $TOKEN" \
-  -d '{"seatIds":[1]}'
-```
-
-**Trying to book the same seat again returns 409, not a 500** (and Day 7's `BookingConcurrencyIT` proves this holds even when the requests genuinely race, not just when they're sequential like this):
-
-```bash
-curl -i -X POST http://localhost:8080/api/v1/bookings -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $TOKEN" \
-  -d '{"seatIds":[1]}'
-```
-
-**Paginated, filterable, sortable event search:**
-
-```bash
-# Defaults: 20 per page, soonest first
-curl "http://localhost:8080/api/v1/events"
-
-# Page 2, 5 per page
-curl "http://localhost:8080/api/v1/events?page=1&size=5"
-
-# Filter by city + category, sorted by date descending
-curl "http://localhost:8080/api/v1/events?city=Cairo&category=CONCERT&sort=eventDate,desc"
-
-# Date range filter
-curl "http://localhost:8080/api/v1/events?fromDate=2026-01-01T00:00:00Z&toDate=2026-12-31T23:59:59Z"
-```
-
-**A validation failure:**
-
-```bash
-curl -i -X POST http://localhost:8080/api/v1/events \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $TOKEN" \
-  -d '{"venueId":1,"name":"","category":"NOT_REAL","eventDate":"2020-01-01T00:00:00Z"}'
-```
-
-```json
-{
-  "timestamp": "2026-09-13T10:15:00Z",
-  "status": 400,
-  "error": "Bad Request",
-  "message": "Validation failed",
-  "path": "/api/v1/events",
-  "correlationId": "5b0c7e1e-3f0a-4c1d-9a55-2f7d7f1f6a11",
-  "fieldErrors": {
-    "name": "name is required",
-    "category": "must be one of: CONCERT, SPORTS, THEATER, CONFERENCE, EXHIBITION, OTHER",
-    "eventDate": "eventDate must be at least 1 hour from now"
-  }
-}
-```
-
-**A not-found:**
-
-```json
-{
-  "timestamp": "2026-09-13T10:16:00Z",
-  "status": 404,
-  "error": "Not Found",
-  "message": "Event not found with id 999",
-  "path": "/api/v1/events/999",
-  "correlationId": "0d4a5d2e-7c1b-4b8e-8e0f-9a3b6c2d1e77",
-  "fieldErrors": null
-}
-```
-
-## Full end-to-end test flow
-
-A single ordered walkthrough exercising everything built so far — infra, CRUD, search, concurrency, and caching — against a clean local stack. Run each block in order; later blocks assume the ids created by earlier ones (`venueId=1`, `eventId=1`, `seatId=1`, `userId=1`).
-
-**1. Bring the stack up and confirm health**
-
-```bash
-docker compose up -d
-curl http://localhost:8080/actuator/health
-# {"status":"UP"}
-```
-
-**2. Venue → Event → Seat → User (core domain, Days 2–3)**
-
-```bash
-curl -X POST http://localhost:8080/api/v1/venues -H "Content-Type: application/json" \
-  -d '{"name":"Cairo Arena","city":"Cairo","address":"Nasr City","capacity":5000}'
-
-curl -X POST http://localhost:8080/api/v1/events -H "Content-Type: application/json" \
-  -d '{"venueId":1,"name":"Launch Night","description":"Opening event","category":"CONCERT","eventDate":"2026-12-01T19:00:00Z"}'
-
-curl -X POST http://localhost:8080/api/v1/events/1/seats -H "Content-Type: application/json" \
-  -d '{"seatNumber":"A1","section":"Floor","price":50.00}'
-
-curl -X POST http://localhost:8080/api/v1/users -H "Content-Type: application/json" \
-  -d '{"fullName":"Ahmed Test","email":"ahmed@example.com"}'
-```
-
-**3. Paginated, filterable, sortable event search (Day 4)**
-
-```bash
-curl "http://localhost:8080/api/v1/events"
-curl "http://localhost:8080/api/v1/events?page=0&size=5"
-curl "http://localhost:8080/api/v1/events?city=Cairo&category=CONCERT&sort=eventDate,desc"
-curl "http://localhost:8080/api/v1/events?fromDate=2026-01-01T00:00:00Z&toDate=2026-12-31T23:59:59Z"
-```
-
-**4. Validation + error handling (Day 5)**
-
-```bash
-# 400 - fails name/category/date validation at once
-curl -i -X POST http://localhost:8080/api/v1/events -H "Content-Type: application/json" \
-  -d '{"venueId":1,"name":"","category":"NOT_REAL","eventDate":"2020-01-01T00:00:00Z"}'
-
-# 404 - consistent ErrorResponse shape for not-found too
-curl -i http://localhost:8080/api/v1/events/999
-```
-
-**5. Booking + optimistic locking under a real race (Days 6–7)**
-
-```bash
-# Succeeds - reserves seat 1
-curl -i -X POST http://localhost:8080/api/v1/bookings -H "Content-Type: application/json" \
-  -d '{"userId":1,"seatIds":[1]}'
-
-# Same seat again - clean 409, not a 500
-curl -i -X POST http://localhost:8080/api/v1/bookings -H "Content-Type: application/json" \
-  -d '{"userId":1,"seatIds":[1]}'
-```
-
-```bash
-# The real proof: 10 threads racing the same seat simultaneously via
-# BookingConcurrencyIT - 1 winner, 9 conflicts, seat version ends at 1
-mvn verify
-```
-
-**6. Redis cache-aside (Day 8)**
-
-```bash
-# First call - Postgres (watch the DEBUG Hibernate SQL log line)
-curl http://localhost:8080/api/v1/events/1
-# Second call within 5m - Redis, no SQL log line
-curl http://localhost:8080/api/v1/events/1
-
-curl http://localhost:8080/api/v1/events/1/seats
-curl http://localhost:8080/api/v1/events/1/seats
-
-# Confirm what actually landed in Redis
-docker exec eventhub-redis redis-cli KEYS '*'
-docker exec eventhub-redis redis-cli GET 'events::1'
-
-# A write evicts its own cache entries - immediately reflected, no wait
-curl -X PUT http://localhost:8080/api/v1/events/1 -H "Content-Type: application/json" \
-  -d '{"venueId":1,"name":"Launch Night (Rescheduled)","description":"Opening event","category":"CONCERT","eventDate":"2026-12-02T19:00:00Z"}'
-curl http://localhost:8080/api/v1/events/1   # updated name comes back immediately
-```
-
-**7. Full test suite**
-
-```bash
-mvn test      # unit tests + full-context Testcontainers smoke test
-mvn verify    # adds all three *IT integration suites - slower, needs Docker
-```
-
-**8. Cache invalidation on booking (Day 9)** — a fresh seat, so the cache starts clean:
-
-```bash
-curl -X POST http://localhost:8080/api/v1/events/1/seats -H "Content-Type: application/json" \
-  -d '{"seatNumber":"A2","section":"Floor","price":50.00}'
-
-curl http://localhost:8080/api/v1/events/1/seats                # caches the listing
-docker exec eventhub-redis redis-cli KEYS 'seat-availability*'  # shows the cached key
-
-curl -X POST http://localhost:8080/api/v1/bookings -H "Content-Type: application/json" \
-  -d '{"userId":1,"seatIds":[2]}'                                # books seat A2 (id 2)
-
-docker exec eventhub-redis redis-cli KEYS 'seat-availability*'  # empty - evicted immediately
-curl http://localhost:8080/api/v1/events/1/seats                # A2 shows RESERVED, no 30s wait
-```
-
-**9. Kafka topology (Day 11)** — confirms the topic exists:
-
-```bash
-docker exec eventhub-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
-# booking-confirmed-events
-```
-
-**10. Booking event published (Day 12)** — a fresh booking, then read it back from the topic:
-
-```bash
-curl -X POST http://localhost:8080/api/v1/events/1/seats -H "Content-Type: application/json" \
-  -d '{"seatNumber":"A3","section":"Floor","price":50.00}'
-
-curl -X POST http://localhost:8080/api/v1/bookings -H "Content-Type: application/json" \
-  -d '{"userId":1,"seatIds":[3]}'                                # books seat A3 (id 3)
-
-docker exec eventhub-kafka /opt/kafka/bin/kafka-console-consumer.sh \
-  --bootstrap-server localhost:9092 --topic booking-confirmed-events --from-beginning --max-messages 1
-# {"bookingId":..,"userId":1,"userEmail":"...","eventId":1,"seatIds":[3],"totalAmount":50.00,"confirmedAt":"..."}
-```
-
-**11. Notification consumer reacts independently (Day 13)** — same booking call as above; check the app's own console output, not Kafka's, for a line like:
-
-```
-Mock email -> ahmed@example.com: your booking .. for event 1 (1 seat(s), total 50.00) is confirmed
-```
-
-Nothing in the `curl` request or `BookingServiceImpl` triggers that line directly — `NotificationListener` picked it up off the topic on its own.
-
-**12. Mock payment resolves the booking (Day 14)** — same booking as step 11 above; check the booking a moment later:
-
-```bash
-curl -X POST http://localhost:8080/api/v1/events/1/seats -H "Content-Type: application/json" \
-  -d '{"seatNumber":"A4","section":"Floor","price":50.00}'
-
-curl -X POST http://localhost:8080/api/v1/bookings -H "Content-Type: application/json" \
-  -d '{"userId":1,"seatIds":[4]}'
-# {"id":..,"status":"PENDING",...}  <- right after the call, payment hasn't landed yet
-
-sleep 2
-curl http://localhost:8080/api/v1/bookings/<id-from-above>
-# {"id":..,"status":"CONFIRMED",...}  <- PaymentProcessedListener moved it, asynchronously
-
-docker exec eventhub-kafka /opt/kafka/bin/kafka-console-consumer.sh \
-  --bootstrap-server localhost:9092 --topic payment-processed-events --from-beginning --max-messages 1
-# {"bookingId":..,"eventId":1,"seatIds":[4],"totalAmount":50.00,"status":"SUCCEEDED","reason":null,"processedAt":"..."}
-```
-
-To see the decline branch instead, book a seat priced above `payment.mock.decline-threshold` (default `1000.00`) — the booking settles on `FAILED` and the seat referenced above goes back to `AVAILABLE` (confirm with `GET /api/v1/events/1/seats`) instead of staying `RESERVED` forever.
-
-### Authenticated flow: register, book, cancel
-
-Since Day 16 every booking endpoint needs a token. With the stack up and the app running:
-
-```bash
-# 1. register (returns a token immediately) - or POST /api/v1/auth/login later
-curl -s -X POST http://localhost:8080/api/v1/auth/register -H "Content-Type: application/json" \
-  -d '{"fullName":"Sara","email":"sara@example.com","password":"correct-horse-battery"}'
-# {"token":"eyJ...","userId":1,"fullName":"Sara","email":"sara@example.com"}
-
-TOKEN=<paste the token from above>
-
-# 2. create seats (needs auth now) and book one - note: no userId in the body anymore
-curl -X POST http://localhost:8080/api/v1/events/1/seats -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" -d '{"seatNumber":"B1","section":"Floor","price":50.00}'
-
-curl -X POST http://localhost:8080/api/v1/bookings -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" -d '{"seatIds":[7]}'
-
-# 3. cancel it - the seat goes back to AVAILABLE
-curl -X POST http://localhost:8080/api/v1/bookings/<id>/cancel -H "Authorization: Bearer $TOKEN"
-
-# 4. the things that should fail
-curl -i http://localhost:8080/api/v1/bookings/<id>                     # 401 - no token
-curl -i http://localhost:8080/actuator/metrics                         # 401 - metrics are locked
-curl -i http://localhost:8080/actuator/health                          # 200 - probes stay open
-# register a second user, then GET the first user's booking with their token -> 403
-```
-
-## Project structure
-
-```
-Dockerfile                   # Day 18 - multi-stage build: Maven build stage -> JRE-only, non-root runtime image
-.dockerignore                # Day 18 - keeps target/, .git, IDE files and .env out of the build context
-docker-compose.yml           # Day 18 - the full stack: app + Postgres + Redis + Kafka, health-gated startup
-.env.example                 # Day 18 - safe, committed template for local Compose configuration
-scripts/smoke-test.ps1       # Day 18 - end-to-end register -> book -> pay -> cancel verification
-scripts/load-test.ps1        # Day 21 - concurrent booking races + measured Redis-backed reads
-scripts/seed-demo.ps1        # Day 23 - idempotent, opt-in seed runner for the Compose database
-scripts/demo-data.sql        # Day 23 - two venues, three future events, and 24 available seats
-docs/architecture.drawio     # Day 22 - editable request, event, cache, and Docker network diagrams
-.github/workflows/ci.yml     # Days 19-20 - CI on every change; publish tested image on the default branch
-LICENSE                      # MIT
-pom.xml
-
-src/main/java/com/ahdyahmed/eventhub/
-├── EventhubApplication.java   # entry point
-├── common/
-│   ├── BaseEntity.java             # shared id + audit columns, JPA-safe equals/hashCode
-│   ├── dto/
-│   │   └── PageResponse.java       # framework-agnostic pagination wrapper
-│   ├── logging/                    # Day 17
-│   │   ├── CorrelationId.java                  # header name + validate-or-generate rules
-│   │   ├── MdcKeys.java                        # correlationId / userId MDC key names
-│   │   ├── LogEvents.java                      # stable "event" names for lifecycle log lines
-│   │   ├── CorrelationIdFilter.java            # assigns/echoes/clears the id, ahead of Spring Security
-│   │   ├── RequestLoggingFilter.java           # one access-log line per request
-│   │   ├── CorrelationIdProducerInterceptor.java  # MDC -> Kafka record header
-│   │   └── CorrelationIdRecordInterceptor.java    # Kafka record header -> MDC
-│   ├── exception/
-│   │   ├── ResourceNotFoundException.java
-│   │   ├── SeatUnavailableException.java   # 409 - business-state or optimistic-lock conflict
-│   │   ├── BookingValidationException.java # 400 - cross-field booking rules
-│   │   ├── InvalidBookingStateTransitionException.java  # 409 - illegal BookingStatus move (Day 14)
-│   │   ├── ErrorResponse.java      # one error shape for the whole API
-│   │   └── GlobalExceptionHandler.java
-│   └── validation/
-│       ├── FutureByHours.java      # custom constraint: "at least N hours from now"
-│       └── FutureByHoursValidator.java
-├── user/
-│   ├── User.java
-│   ├── UserRepository.java
-│   ├── UserService.java
-│   ├── UserServiceImpl.java
-│   ├── UserController.java
-│   ├── UserMapper.java             # toResponse only - registration moved to auth/ (Day 16)
-│   └── dto/
-│       └── UserResponse.java
-├── auth/                           # Day 16
-│   ├── AuthController.java         # POST /register, POST /login - the only public write endpoints
-│   ├── AuthService.java
-│   ├── AuthServiceImpl.java        # the one place a raw password becomes a stored hash
-│   ├── UserPrincipal.java          # Spring Security UserDetails wrapper around User
-│   ├── EventHubUserDetailsService.java
-│   ├── JwtService.java             # sign + verify HS256 tokens (jjwt)
-│   ├── JwtProperties.java          # typed binding for security.jwt.*
-│   ├── JwtAuthenticationFilter.java       # Bearer token -> SecurityContext, once per request
-│   ├── JwtAuthenticationEntryPoint.java   # 401s from the filter chain in the API's own error shape
-│   └── dto/
-│       ├── RegisterRequest.java
-│       ├── LoginRequest.java
-│       └── AuthResponse.java
-├── venue/
-│   ├── Venue.java
-│   ├── VenueRepository.java
-│   ├── VenueService.java
-│   ├── VenueServiceImpl.java
-│   ├── VenueController.java
-│   ├── VenueMapper.java
-│   └── dto/
-│       ├── VenueRequest.java
-│       └── VenueResponse.java
-├── event/
-│   ├── Event.java
-│   ├── EventRepository.java
-│   ├── EventService.java
-│   ├── EventServiceImpl.java
-│   ├── EventController.java
-│   ├── EventMapper.java
-│   ├── EventSpecifications.java    # one Specification per filterable field
-│   ├── validation/
-│   │   ├── ValidCategory.java      # custom constraint: fixed category allow-list
-│   │   └── ValidCategoryValidator.java
-│   └── dto/
-│       ├── EventRequest.java
-│       ├── EventResponse.java
-│       ├── EventSearchCriteria.java
-│       └── VenueSummary.java
-├── seat/
-│   ├── Seat.java                   # carries @Version
-│   ├── SeatStatus.java
-│   ├── SeatRepository.java
-│   ├── SeatService.java
-│   ├── SeatServiceImpl.java
-│   ├── SeatController.java
-│   ├── SeatMapper.java
-│   └── dto/
-│       ├── SeatRequest.java
-│       └── SeatResponse.java
-├── booking/
-│   ├── Booking.java
-│   ├── BookingItem.java
-│   ├── BookingStatus.java
-│   ├── BookingStateMachine.java           # Day 14 - legal status transitions, formalized
-│   ├── SeatAvailabilityCacheEvictor.java  # Day 14 - eviction logic shared by booking + payment
-│   ├── PaymentProcessedListener.java      # Day 14 - @KafkaListener that drives the state machine
-│   ├── BookingRepository.java
-│   ├── BookingService.java
-│   ├── BookingServiceImpl.java     # the optimistic-locking reservation logic
-│   ├── BookingController.java
-│   ├── BookingMapper.java
-│   ├── dto/
-│   │   ├── BookingRequest.java
-│   │   ├── BookingResponse.java
-│   │   └── BookingItemResponse.java
-│   └── event/                      # Day 12
-│       ├── BookingConfirmedEvent.java
-│       └── BookingConfirmedEventPublisher.java   # AFTER_COMMIT bridge to Kafka
-├── notification/                   # Day 13
-│   └── NotificationListener.java   # @KafkaListener - the decoupling proof point
-├── payment/                        # Day 14
-│   ├── PaymentService.java         # mock-charge contract
-│   ├── PaymentResult.java
-│   ├── PaymentStatus.java
-│   ├── MockPaymentServiceImpl.java # deterministic threshold-based mock charge
-│   ├── PaymentConsumer.java        # @KafkaListener - booking-confirmed-events in, payment-processed-events out
-│   └── event/
-│       └── PaymentProcessedEvent.java
-└── config/
-    ├── CacheConfig.java                  # @EnableCaching + per-cache-name Redis TTLs
-    ├── KafkaTopicConfig.java             # topic topology (Day 11), now 4 topics (2 + their DLTs)
-    ├── PaymentEventsConsumerConfig.java  # Day 14 - dedicated consumer factory for PaymentProcessedEvent
-    ├── KafkaErrorHandlingConfig.java     # Day 15 - shared retry + dead-letter-topic policy
-    ├── OpenApiConfig.java                # Day 23 - API metadata + Swagger JWT authorization scheme
-    └── SecurityConfig.java               # Day 16 - stateless JWT filter chain, public vs. protected routes
-
-src/main/resources/
-├── application.yml
-├── logback-spring.xml                    # Day 17 - JSON console logs (default) / plain text (`pretty` profile)
-└── db/migration/
-    ├── V1__baseline.sql
-    ├── V2__domain_schema.sql             # users, venues, events, seats, bookings, booking_items
-    ├── V3__seat_optimistic_locking.sql   # adds seats.version
-    ├── V4__add_user_password.sql         # Day 16 - users.password_hash
-    ├── V5__booking_optimistic_locking.sql # prevents cancel/payment lost updates
-    └── V6__case_insensitive_user_email.sql # enforces normalized email identity
-
-src/test/java/com/ahdyahmed/eventhub/
-├── EventhubApplicationTests.java        # Testcontainers context + schema/entity consistency check
-├── venue/
-│   └── VenueServiceImplTest.java
-├── event/
-│   ├── EventServiceImplTest.java
-│   └── dto/
-│       └── EventRequestValidationTest.java   # exercises both custom validators directly
-├── booking/
-│   ├── BookingServiceImplTest.java      # unit: happy path + every failure mode, mocked repos
-│   ├── BookingConcurrencyIT.java        # integration: real concurrent HTTP requests, real Postgres
-│   ├── BookingStateMachineTest.java     # Day 14 - every legal/illegal transition, including terminal states
-│   └── PaymentProcessedListenerTest.java # Day 14 - status + seat + cache effects, mocked repo
-└── payment/
-    ├── MockPaymentServiceImplTest.java  # Day 14 - deterministic threshold behavior
-    └── PaymentConsumerTest.java         # Day 14 - charge result -> published event mapping
-auth/
-├── JwtServiceTest.java             # Day 16 - round trip, wrong user, expiry, wrong secret
-├── AuthServiceImplTest.java        # Day 16 - register hashes the password; login/duplicate errors propagate
-└── JwtAuthenticationFilterTest.java # Day 17 - userId reaches the MDC for a valid token, never for a bad one
-common/
-├── exception/
-│   └── ErrorResponseTest.java      # Day 17 - correlationId picked up from the MDC
-└── logging/
-    ├── CorrelationIdFilterTest.java            # Day 17 - generate/echo/reject-hostile/always-clear
-    ├── RequestLoggingFilterTest.java           # Day 17 - levels, no query string, exception path
-    └── CorrelationIdKafkaInterceptorsTest.java # Day 17 - producer stamp, consumer restore, never overwrite
-integration/
-└── EventChainIT.java   # Day 15 - the full booking -> payment event -> notification event chain,
-                         # plus a forced-failure retry-then-dead-letter test, against real Postgres + Kafka
-```
-
-Packages are organized **by feature (vertical slice)**, not by technical layer (i.e. no top-level `entity/`, `repository/`, `service/`, `controller/` packages holding everything). Each domain concept — `user`, `venue`, `event`, `seat`, `booking` — owns its own entity, repository, service, controller, and DTOs. This scales better than layer-first packaging once a domain has more than a handful of types.
-
-## What Day 18 adds
-
-The roadmap's own words: "Multi-stage `Dockerfile` for the app (small final image). Finalize `docker-compose.yml`: app + postgres + redis + rabbitmq, one `docker compose up` should run everything." (This project uses Kafka, not RabbitMQ — so the stack is app + Postgres + Redis + Kafka.)
-
-Day 18 is built in three parts. **All three parts are complete.**
-
-- [x] **Part 1 — the image.** Multi-stage `Dockerfile` + `.dockerignore`, and the one config change the app needed to run in a container.
-- [x] **Part 2 — the stack.** The app joins `docker-compose.yml`, with health-gated startup order and Kafka reachable from both the host and other containers.
-- [x] **Part 3 — polish.** `.env.example`, a full-stack smoke test, docs.
-
-### Part 1: the image
-
-- **`Dockerfile`, two stages.** *Build*: `maven:3.9-eclipse-temurin-21` compiles and packages the app, then splits the jar into Spring Boot's layers. *Runtime*: `eclipse-temurin:21-jre-alpine` — JRE only, no Maven, no compiler — receives just those layers. Only the runtime stage is the shipped image.
-- **Layered, so rebuilds are fast.** Dependencies, loader, snapshot dependencies and application code are separate image layers, ordered least to most volatile. A code-only change rebuilds a layer of a few hundred KB and reuses the cached dependency layer; the pom is copied and resolved *before* the source for the same reason.
-- **Tests are skipped in the image build** (`-DskipTests`): the `*IT` classes need Docker (Testcontainers) and there's no Docker daemon inside a build stage. Tests run in CI (Day 19).
-- **Runs as a non-root user** (`eventhub`, uid 1001).
-- **`HEALTHCHECK`** against `/actuator/health/liveness` (public, no token) using Alpine's built-in `wget`. Liveness, not full health: the full endpoint goes `DOWN` whenever Postgres or Redis is unreachable, and "my database is restarting" shouldn't make the container declare *itself* dead.
-- **Container-aware JVM** — heap sized as a percentage of the container's memory limit, and the JVM exits on `OutOfMemoryError` so it gets restarted instead of lingering half-dead. Flags go through `JAVA_OPTS` and an `exec java` entrypoint (not `JAVA_TOOL_OPTIONS`, which the JVM announces on stderr with a non-JSON line); `exec` makes java PID 1 so `docker stop` triggers a graceful Spring Boot shutdown.
-- **`.dockerignore`** keeps `target/`, `.git`, IDE files and any `.env` out of the build context.
-- **`DB_HOST`** added to `application.yml`. The database host used to be hardcoded to `localhost`; inside a container that is the app's own container, not Postgres. The default is unchanged, so running locally behaves exactly as before.
-
-### Part 2: the stack
-
-- **`app` service in `docker-compose.yml`** — built from the `Dockerfile`, published on `8080`, wired to the other services by their compose service names (`postgres:5432`, `redis:6379`, `kafka:29092`). Inside the compose network containers use each other's *container* ports; the host-mapped ports (`5433`, `6380`, `9094`) are only for things running on your machine.
-- **Health-gated startup** — `depends_on` with `condition: service_healthy` on Postgres, Redis and Kafka. A plain `depends_on` only waits for a container to *exist*; these take seconds more to accept connections, and without the gate Flyway's first migration and Kafka's topic creation would race them.
-- **Kafka has two listeners now.** Kafka's protocol makes the broker tell every client which address to use for later requests, and the right address depends on where the client runs: `kafka:29092` (`INTERNAL`) for other containers, `localhost:9094` (`EXTERNAL`, the published port) for the host. One advertised address can't serve both — `localhost` inside the app container is the container itself. This is what lets `docker compose up` *and* `mvn spring-boot:run` work against the same broker. The broker healthcheck now probes the internal listener.
-- **Memory limit (`1g`)** on the app container — it's what the JVM's `MaxRAMPercentage` is a percentage *of*; without a limit the heap would be sized from the host's RAM.
-- **Log rotation** (`json-file`, 10 MB x 3) — Day 17 made stdout a JSON log stream, and Docker's default driver keeps all of it forever.
-- **`JWT_SECRET` is overridable** (`JWT_SECRET=... docker compose up`). The fallback is the same local-dev-only placeholder `application.yml` ships with — fine for a local demo, never for a real deployment.
-
-### Part 3: release polish
-
-- **`.env.example`** documents every Compose-level setting without committing a real secret. Copy it to the ignored `.env` file before changing ports, credentials, image tags, memory, token lifetime, or the mock payment threshold.
-- **`scripts/smoke-test.ps1`** exercises the actual running stack: readiness, registration, authenticated venue/event/seat creation, asynchronous Kafka payment confirmation, booked-seat state, cancellation, seat release, and correlation-ID propagation. Each run creates uniquely named data, so it is repeatable against a persistent local database.
-- **Compose defaults remain zero-config.** The environment template is optional; `docker compose up --build` still works with the documented defaults.
-
-### Try it
-
-```bash
-# Everything: Postgres + Redis + Kafka + the app. First run builds the image.
-docker compose up -d --build
-
-# The app container should become "healthy"
-docker compose ps
-curl http://localhost:8080/actuator/health/liveness     # {"status":"UP"}
-curl http://localhost:8080/actuator/health/readiness    # {"status":"UP"}
-
-# Windows PowerShell: run the full booking/payment/cancellation smoke test
-.\scripts\smoke-test.ps1
-
-# The app's JSON logs, including the Flyway migrations and Kafka startup
-docker compose logs -f app
-
-# The full flow: see "Authenticated flow: register, book, cancel" above.
-# Watch the booking -> payment -> notification chain share one correlation id:
-docker compose logs app | grep '"correlationId":"<id from the X-Correlation-Id response header>"'
-
-# Stop everything (add -v to also delete the Postgres/Redis/Kafka data volumes)
-docker compose down
-```
-
-Things to know:
-
-- **Port clash:** the `app` container publishes `8080`. If you also run `mvn spring-boot:run` at the same time, one of them can't bind it — stop one, or set a different `SERVER_PORT` locally.
-- **Infra only:** `docker compose up -d postgres redis kafka` starts just the dependencies, for the original run-the-app-from-your-IDE workflow; the host-mapped ports are unchanged.
-- **Existing Kafka volume:** if you started the old single-listener Kafka earlier, its data volume is reused and works with the new listeners. If anything looks stuck, `docker compose down -v` gives a clean slate.
-
-## What Day 19 adds
-
-The CI workflow at `.github/workflows/ci.yml` runs for every push and pull request, with a manual trigger available for troubleshooting:
-
-- **One authoritative Maven gate:** `mvn --batch-mode --no-transfer-progress verify` compiles the project, runs the unit suite, starts real Postgres/Redis/Kafka containers for all `*IT` tests, and packages the executable Spring Boot JAR only when those checks pass.
-- **Java 21 on Ubuntu:** Eclipse Temurin matches the project's declared runtime, while the GitHub-hosted runner supplies Docker for Testcontainers.
-- **Dependency caching and concurrency control:** Maven dependencies are cached from `pom.xml`; a newer run on the same branch cancels an obsolete in-progress run.
-- **Useful artifacts:** Surefire/Failsafe reports are retained for seven days even when CI fails, and a successful executable JAR is retained for fourteen days.
-- **Least-privilege token access:** the workflow only requests read access to repository contents and does not require secrets.
-
-## What Day 20 adds
-
-The same CI workflow now has a dependent `publish-image` job. It runs only for a direct push to the repository's default branch and only after the complete `test-and-build` job succeeds, so pull requests and failing revisions can never publish an image.
-
-- **GitHub Container Registry:** images are published as `ghcr.io/<owner>/<repository>` using the built-in `GITHUB_TOKEN`; no personal access token or repository secret is required.
-- **Traceable tags:** every publication receives `latest`, the default-branch name, and an immutable `sha-<full-commit-sha>` tag. Docker metadata also adds standard OCI source, revision, and creation labels.
-- **Fast rebuilds:** Docker Buildx persists build layers in GitHub Actions cache, complementing the layered Dockerfile so unchanged Maven dependencies are reused.
-- **Least privilege:** only the publishing job receives `packages: write`; the test job and pull-request runs retain read-only access.
-
-After the first successful default-branch run, use the published image with the existing stack (authenticate with `docker login ghcr.io` first if the package is private):
-
-```powershell
-$env:APP_IMAGE = "ghcr.io/<owner>/<repository>:latest"
-docker compose pull app
-docker compose up -d --no-build
-```
-
-## What Day 21 adds
-
-`scripts/load-test.ps1` drives the real Compose stack through the public HTTP API. Each run creates isolated data, so it is safe to repeat against persistent local volumes.
-
-- **Booking contention:** creates a configurable set of seats and races multiple authenticated booking requests for each one. Every seat must produce exactly one HTTP `201` winner and `N-1` HTTP `409` conflicts—any 500, timeout, duplicate winner, or missing winner fails the run.
-- **Event-chain settlement:** every winning booking must become `CONFIRMED` through the real Kafka payment flow before the timeout, and every corresponding seat must finish `BOOKED`.
-- **Cache load and correctness:** warms the event and seat-list keys, issues concurrent reads, rejects any non-200 response or stale seat state, and verifies the Actuator `cache.gets` counters recorded the expected Redis hits.
-- **Finding fixed:** Redis cache statistics were disabled, leaving Actuator's cache counters at zero even while Redis contained live keys. `CacheConfig` now enables statistics, making cache behavior observable and testable under load.
-
-Run the default profile after the stack is healthy:
-
-```powershell
-docker compose up -d --build
-.\scripts\load-test.ps1
-```
-
-Increase the pressure without editing the script:
-
-```powershell
-.\scripts\load-test.ps1 -SeatCount 40 -ContendersPerSeat 10 -ReadRequests 1000 -TimeoutSeconds 120
-```
-
-Verified locally on October 2, 2026, the heavier profile completed 400 booking attempts with exactly 40 winners and 360 conflicts, settled all 40 bookings, then served 1,000 cached reads with zero failures and exactly 500 measured hits in each Redis cache. Throughput is machine-dependent; correctness counts are the acceptance criteria.
-
-## What Day 22 adds
-
-- **One editable architecture artifact:** [`docs/architecture.drawio`](docs/architecture.drawio) contains four named diagrams—request flow, event flow, cache layer, and Docker network—and opens directly in [diagrams.net](https://app.diagrams.net/).
-- **One repository overview:** the diagram below keeps the system's major synchronous and asynchronous boundaries visible on GitHub without requiring a diagram editor.
-- **An explicit decision record:** the choices behind Kafka, optimistic locking, Redis, transaction-bound publishing, the modular monolith, JWT, Flyway, and deterministic payments are documented with both benefits and costs.
+EventHub is a production-minded Spring Boot portfolio system for public event discovery and concurrency-safe ticket booking. It demonstrates the failure cases that make booking systems interesting: simultaneous seat races, cache consistency, asynchronous payment state, consumer retries, ownership enforcement, and traceability across HTTP and Kafka.
+
+**Release:** v1.0 · Java 21 · Spring Boot 3.3.4 · PostgreSQL · Redis · Kafka · Docker
+
+## Why this project stands out
+
+| Problem | Implementation | Proof |
+|---------|----------------|-------|
+| Two users race for one seat | JPA `@Version` optimistic locking with transaction-level conflict translation | Real concurrent HTTP integration test and load harness: exactly one `201`, all other contenders receive `409` |
+| Hot catalog and availability reads | Redis cache-aside with per-cache TTLs, targeted eviction, graceful cache-error handling, and metrics | Testcontainers cache hit/miss/invalidation tests plus measured hits under real-stack load |
+| Booking work should not block on payment/email | Kafka fan-out by consumer group; payment result drives the booking state machine | End-to-end Testcontainers event-chain test including retry and dead-letter behavior |
+| A user must not access another user's booking | Stateless JWT identity and service-layer ownership checks | Authentication, filter, and ownership test coverage with consistent `401`/`403` errors |
+| One request crosses HTTP and async boundaries | Validated correlation ID in MDC and Kafka record headers; JSON lifecycle logs | Filter/interceptor tests and end-to-end smoke verification |
 
 ## Architecture
 
 ```mermaid
 flowchart LR
     Client[HTTP client] --> Correlation[Correlation ID filter]
-    Correlation --> Security[JWT security filter chain]
+    Correlation --> Security[JWT filter chain]
     Security --> Controller[REST controllers]
     Controller --> Service[Feature services]
 
-    Service -->|authoritative reads and writes| Postgres[(PostgreSQL 16)]
-    Service -->|cache-aside reads and eviction| Redis[(Redis 7)]
+    Service -->|authoritative data| Postgres[(PostgreSQL 16)]
+    Service -->|cache-aside / eviction| Redis[(Redis 7)]
     Service -->|after DB commit| BookingTopic[[booking-confirmed-events]]
 
     BookingTopic -->|payment-service group| Payment[Mock payment consumer]
     BookingTopic -->|notification-service group| Notification[Notification consumer]
     Payment --> PaymentTopic[[payment-processed-events]]
     PaymentTopic -->|booking-service group| Settlement[Booking settlement listener]
-    Settlement -->|status and seat state| Postgres
+    Settlement -->|booking + seat state| Postgres
     Settlement -->|evict availability| Redis
 
     BookingTopic -. exhausted retries .-> BookingDLT[[booking-confirmed-events.DLT]]
     PaymentTopic -. exhausted retries .-> PaymentDLT[[payment-processed-events.DLT]]
 ```
 
-The application is a feature-oriented Spring Boot modular monolith. HTTP requests pass through correlation and security filters before reaching controller → service → repository slices. PostgreSQL remains authoritative; Redis accelerates read-heavy views only. A successful booking is published to Kafka after the database transaction commits, then independent consumer groups process payment and notification work. Payment results drive the final booking/seat state and invalidate availability caches. The correlation ID travels from the incoming HTTP header through Kafka record headers, so the whole chain can be traced in structured logs.
+The application is a feature-oriented modular monolith. PostgreSQL is authoritative; Redis only accelerates reads. Booking creation reserves all requested seats in one transaction or fails without a partial booking. Kafka processing starts after that database transaction commits, then independent payment and notification groups receive the event.
 
-In Docker Compose, `app` waits for healthy `postgres`, `redis`, and `kafka` services and reaches them over Compose DNS at `postgres:5432`, `redis:6379`, and `kafka:29092`. Host tools use the published ports `5433`, `6380`, and `9094`; clients reach the API on `8080`. Kafka's separate internal and external advertised listeners make both network paths valid.
+The editable diagrams.net source contains four detailed pages—request flow, event flow, cache layer, and Docker network: [`docs/architecture.drawio`](docs/architecture.drawio).
 
-## Design decisions & trade-offs
+## Quick start
 
-| Decision | Why this project chose it | Cost, risk, or production follow-up |
-|----------|---------------------------|-------------------------------------|
-| **Kafka instead of the roadmap's suggested RabbitMQ** | Booking-keyed records preserve per-booking partition order, while separate consumer groups let payment and notification each receive every booking event. Kafka also makes replay, retry topics, and stream-oriented integration visible in the portfolio. | A single-broker local Kafka stack is heavier and more complex than RabbitMQ, and replication factor `1` is not production-durable. Production would run a multi-broker secured cluster with replication and monitoring. |
-| **Optimistic locking for seats** | Most seat reads are uncontended, so `@Version` prevents double booking without holding database locks across requests. Losing racers receive a deliberate `409 Conflict`. | Under extreme contention, callers may see more conflicts and need retry/backoff or a waiting-room strategy. The current behavior favors correctness and simple failure semantics over queueing every contender. |
-| **Redis cache-aside with targeted eviction** | PostgreSQL stays the source of truth while event/search/availability reads avoid repeated database work. Per-cache TTLs match volatility, and booking, cancellation, event, seat, and payment writes evict affected entries. | Cache invalidation adds complexity and short stale windows remain possible if a process dies between the database write and eviction. Redis failures should degrade to database reads; production would also alert on error-handler activity and hit-rate changes. |
-| **Publish `BookingConfirmedEvent` after commit, without an outbox** | `AFTER_COMMIT` prevents consumers from observing a booking that later rolls back and keeps the learning project compact. | This is **not atomic** with Kafka publication: a crash after the database commit but before broker acknowledgement can lose the event. Production should write an outbox row in the booking transaction, then publish it with retries and idempotent consumers. |
-| **Feature-oriented modular monolith** | One deployable keeps local setup, ACID booking writes, debugging, and CI approachable while feature packages still enforce clear boundaries. | Components cannot scale or deploy independently. If payment or notification load diverges, their consumers are natural extraction points—but that requires versioned contracts and operational ownership. |
-| **Stateless HS256 JWT authentication** | The API remains horizontally scalable without server-side sessions, and booking ownership is enforced from the authenticated user identity rather than a request-supplied user ID. | Tokens cannot be revoked individually before expiry, and a shared signing secret broadens blast radius. Production should use short lifetimes, secret rotation or asymmetric signing, and a revocation/refresh strategy. |
-| **Flyway owns the schema; Hibernate validates it** | Versioned SQL makes database changes reviewable and repeatable, while `ddl-auto: validate` catches entity/schema drift without silently mutating production data. | Every schema change needs an explicit forward migration and rollback/roll-forward plan. This is extra work compared with automatic DDL, but avoids uncontrolled changes. |
-| **Deterministic mock payment threshold** | Identical inputs always produce identical outcomes, which keeps tests, demos, retries, and load runs reproducible. | It does not model gateway latency, timeouts, webhooks, fraud checks, or idempotency keys. A real adapter would need those behaviors plus secure credential and PCI-boundary handling. |
-| **At-least-once consumers with retry and DLT** | Transient failures retry with exponential backoff; exhausted records remain inspectable instead of disappearing. Booking settlement also treats redelivery of an already-applied state as a no-op. | DLT records require monitoring and a controlled replay process. Side effects such as a real email provider would also need explicit idempotency to prevent duplicates. |
-
-## What Day 23 adds
-
-- **Interactive OpenAPI 3 documentation:** springdoc exposes `/swagger-ui.html`, `/v3/api-docs`, and `/v3/api-docs.yaml`. Feature tags and operation summaries make the API scan-friendly, while protected operations reference the documented `bearer-jwt` security scheme.
-- **A working authorization flow:** documentation routes stay public; register/login remain the token entry points; Swagger's **Authorize** control supplies JWTs to protected venue, event, seat, booking, and user operations.
-- **Opt-in demo data:** `scripts/seed-demo.ps1` executes `scripts/demo-data.sql` inside the running Postgres container. It creates two venues, three future-dated events, and 24 seats, then clears only EventHub's catalog cache keys so results are visible immediately.
-- **Safe repeatability:** the SQL reuses its named records and upserts seats, so running it again refreshes dates and details without duplicating the catalog. It is deliberately separate from Flyway so demo records are never injected into an environment simply because the application starts.
-
-Run the full recruiter-ready demo setup:
+Prerequisites: Docker Desktop with Compose and PowerShell 7+.
 
 ```powershell
+Copy-Item .env.example .env   # optional; defaults already work
 docker compose up -d --build
 ./scripts/seed-demo.ps1
 Start-Process http://localhost:8080/swagger-ui.html
 ```
 
-The seed script prints the generated event IDs and dates. Event dates move forward on every run, keeping the public "upcoming events" search useful instead of allowing static sample data to expire.
+The seed is opt-in and idempotent. It creates two venues, three future-dated events, and 24 seats, then clears only EventHub catalog cache keys. It does not create credentials; register your own demo user in Swagger.
 
-## Roadmap
+Verify the stack:
 
-**Week 1 — Foundation & domain**
-- [x] Day 1 — project scaffold, Postgres via Docker Compose, Flyway baseline, health check
-- [x] Day 2 — domain entities (Venue, Event, Seat, User, Booking, BookingItem) + schema migration
-- [x] Day 3 — layered CRUD (Controller → Service → Repository → DTO) for Venue & Event
-- [x] Day 4 — paginated, sortable, dynamically filterable event search
-- [x] Day 5 — bean validation, global exception handling, first unit tests
+```powershell
+docker compose ps
+Invoke-RestMethod http://localhost:8080/actuator/health/liveness
+./scripts/smoke-test.ps1
+```
 
-**Week 2 — Concurrency & caching**
-- [x] Day 6 — booking creation flow with `@Version` optimistic locking on seats
-- [x] Day 7 — concurrency test proving the race condition is handled correctly
-- [x] Day 8 — Redis cache-aside on read-heavy event/seat endpoints
-- [x] Day 9 — cache invalidation on booking/seat state change
-- [x] Day 10 — Testcontainers Redis test coverage
+If port `5433`, `6380`, `9094`, or `8080` is already occupied, change the matching value in `.env`. Stop the stack without deleting its named data volumes:
 
-**Week 3 — Event-driven architecture**
-- [x] Day 11 — Kafka setup + topology (KRaft mode, no ZooKeeper)
-- [x] Day 12 — publish `BookingConfirmedEvent`
-- [x] Day 13 — notification consumer
-- [x] Day 14 — mock payment step + booking status state machine
-- [x] Day 15 — retry/DLT for consumers + end-to-end event flow tests
+```powershell
+docker compose down
+```
 
-**Week 4 — Production readiness**
-- [x] Day 16 — JWT auth + booking ownership checks, Actuator hardening
-- [x] Day 17 — structured JSON logging with correlation IDs
-- [x] Day 18 — multi-stage Dockerfile + full docker-compose stack (app + Postgres + Redis + Kafka), environment template, and end-to-end smoke test
-- [x] Day 19 — GitHub Actions CI (unit + Testcontainers integration tests, build artifacts, and README badge)
-- [x] Day 20 — GitHub Actions CD (publish the tested Docker image to GHCR on the default branch)
-- [x] Day 21 — real-stack concurrent load test, Redis hit metrics, and verified locking/cache correctness
-- [x] Day 22 — editable request/event/cache/Docker architecture diagrams + design decisions and trade-offs
-- [x] Day 23 — polished OpenAPI/Swagger UI + idempotent opt-in demo catalog
-- [ ] Day 24 — final polish, `v1.0` tag
+## Explore the API
+
+- Swagger UI: [http://localhost:8080/swagger-ui.html](http://localhost:8080/swagger-ui.html)
+- OpenAPI JSON: [http://localhost:8080/v3/api-docs](http://localhost:8080/v3/api-docs)
+- OpenAPI YAML: [http://localhost:8080/v3/api-docs.yaml](http://localhost:8080/v3/api-docs.yaml)
+
+In Swagger, call `POST /api/v1/auth/register`, copy the returned token, select **Authorize**, and paste the token without a `Bearer` prefix. Swagger adds the prefix automatically. Protected operations are marked with a lock; public browsing and documentation need no token.
+
+| Method | Path | Auth | Purpose |
+|--------|------|:----:|---------|
+| POST | `/api/v1/auth/register` | No | Create an account and receive a JWT |
+| POST | `/api/v1/auth/login` | No | Exchange credentials for a JWT |
+| GET | `/api/v1/venues` | No | List venues |
+| GET | `/api/v1/venues/{id}` | No | Get a venue |
+| POST / PUT / DELETE | `/api/v1/venues/**` | Yes | Manage venues |
+| GET | `/api/v1/events` | No | Paginated/filterable/sortable event search |
+| GET | `/api/v1/events/{id}` | No | Get an event |
+| POST / PUT / DELETE | `/api/v1/events/**` | Yes | Manage events |
+| GET | `/api/v1/events/{eventId}/seats` | No | List seats, optionally by status |
+| POST | `/api/v1/events/{eventId}/seats` | Yes | Add a seat |
+| POST | `/api/v1/bookings` | Yes | Atomically reserve seats for the caller |
+| GET | `/api/v1/bookings/{id}` | Owner | Read the caller's booking |
+| POST | `/api/v1/bookings/{id}/cancel` | Owner | Cancel and release seats |
+| GET | `/api/v1/users/{id}` | Yes | Read a user profile |
+
+Every validated API error uses one `ErrorResponse` shape and includes the request correlation ID. Clients may send `X-Correlation-Id` using letters, digits, `.`, `_`, or `-` up to 64 characters; invalid values are replaced with a UUID.
+
+## Core flows
+
+### Booking under contention
+
+1. The authenticated user submits one or more seat IDs.
+2. The service locks by optimistic version, validates that every seat belongs to one event and is available, marks them `RESERVED`, and saves a `PENDING` booking.
+3. A concurrent loser receives `409 Conflict`; unexpected persistence details never leak into the API.
+4. A Spring application event is handled only after the transaction commits and is published to Kafka with `bookingId` as the key.
+5. Payment succeeds or fails deterministically; the settlement consumer moves the booking to `CONFIRMED` or `FAILED`, sets seats to `BOOKED` or `AVAILABLE`, and evicts availability.
+
+### Cache behavior
+
+| Cache | Content | TTL |
+|-------|---------|-----|
+| `events` | Event detail by ID | 5 minutes |
+| `event-search` | Filter/page/sort result | 1 minute |
+| `seat-availability` | Event seats plus optional status | 30 seconds |
+
+Writes evict affected entries immediately; TTL is a backstop. Redis is not authoritative: cache get/put/evict failures are logged and the request continues through PostgreSQL. Cache statistics are enabled and exposed through authenticated Actuator metrics.
+
+### Kafka topology
+
+| Topic | Producer | Consumers |
+|-------|----------|-----------|
+| `booking-confirmed-events` | After-commit booking publisher | `payment-service`, `notification-service` |
+| `payment-processed-events` | Payment consumer | `booking-service` |
+| `booking-confirmed-events.DLT` | Shared dead-letter recoverer | Operational inspection/replay |
+| `payment-processed-events.DLT` | Shared dead-letter recoverer | Operational inspection/replay |
+
+Consumers retry transient failures with exponential backoff and publish exhausted records to the matching DLT. The booking state transition is redelivery-safe when the target state is already applied.
+
+## Run the verification suite
+
+Java 21, Maven 3.9+, and Docker are required.
+
+```powershell
+mvn test
+```
+
+Runs the fast unit suite plus the full Spring context check.
+
+```powershell
+mvn verify
+```
+
+Also runs the Testcontainers integration boundary:
+
+- `BookingConcurrencyIT` — real concurrent HTTP requests and PostgreSQL locking.
+- `RedisCacheIT` — real PostgreSQL + Redis hit/miss and eviction behavior.
+- `EventChainIT` — real PostgreSQL + Kafka + Redis booking/payment/notification flow, retries, and DLT.
+
+The v1.0 verification gate passes **95 unit/context tests + 11 integration tests**.
+
+For a running Compose stack:
+
+```powershell
+./scripts/smoke-test.ps1
+./scripts/load-test.ps1
+./scripts/load-test.ps1 -SeatCount 40 -ContendersPerSeat 10 -ReadRequests 1000 -TimeoutSeconds 120
+```
+
+The heavier verified load profile produced exactly 40 booking winners and 360 clean conflicts, settled all winners through Kafka, then served 1,000 cached reads with zero failures and 500 measured hits in each exercised cache. Throughput is machine-dependent; correctness counts are the acceptance criteria.
+
+## Docker and delivery
+
+The multi-stage image builds with Maven and ships only a Java 21 Alpine JRE. It runs as non-root user `eventhub` (uid 1001), uses a liveness healthcheck, sizes the JVM against the container memory limit, and caps Docker JSON logs.
+
+Compose health-gates the app on PostgreSQL, Redis, and Kafka. Containers use `postgres:5432`, `redis:6379`, and `kafka:29092`; host tools use `5433`, `6380`, and `9094`. Kafka has separate internal and external advertised listeners so both paths work.
+
+GitHub Actions runs `mvn verify` on every push and pull request. A successful default-branch push then publishes the same tested revision to `ghcr.io/<owner>/<repository>` with `latest`, branch, and immutable SHA tags. See [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+
+## Configuration
+
+Copy [`.env.example`](.env.example) to the ignored `.env` file to override local defaults.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `DB_HOST` / `DB_PORT` | `localhost` / `5433` | Host-side PostgreSQL connection |
+| `DB_NAME` / `DB_USER` / `DB_PASSWORD` | local demo values | Database credentials |
+| `REDIS_HOST` / `REDIS_PORT` | `localhost` / `6380` | Host-side Redis connection |
+| `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9094` | Host-side Kafka listener |
+| `SERVER_PORT` | `8080` | HTTP port |
+| `JWT_SECRET` | local placeholder | Replace outside local development; minimum 32 bytes |
+| `JWT_EXPIRATION_MS` | `3600000` | Token lifetime |
+| `PAYMENT_MOCK_DECLINE_THRESHOLD` | `1000.00` | Totals at or above this value fail |
+| `APP_IMAGE` | `eventhub-booking-system:dev` | Compose image/tag |
+| `APP_MEMORY_LIMIT` | `1g` | App container memory limit |
+| `SPRING_PROFILES_ACTIVE` | unset | Default JSON logs; use `pretty` locally |
+
+## Design decisions and trade-offs
+
+| Decision | Benefit | Cost / production follow-up |
+|----------|---------|-----------------------------|
+| Kafka instead of the roadmap's RabbitMQ suggestion | Booking-key ordering, replay semantics, independent consumer groups, explicit retry/DLT behavior | A local single broker is heavier and not durable; production needs a secured replicated cluster |
+| Optimistic locking | No long-held DB locks for the common uncontended case; clean conflict semantics | Very hot seats may require client backoff, a queue, or a waiting room |
+| Redis cache-aside | PostgreSQL remains the source of truth; read load drops | Invalidation complexity and a possible short stale window if a process dies before eviction |
+| After-commit event publication | Consumers cannot observe a rolled-back booking | Not atomic with Kafka; a crash after commit can lose the event—use a transactional outbox in production |
+| Feature-oriented modular monolith | Simple local deployment and ACID booking writes with explicit feature boundaries | Components cannot deploy/scale independently; payment and notification are extraction candidates |
+| Stateless HS256 JWT | Simple horizontal scaling and no server session | No per-token revocation; use short lifetimes, rotation/asymmetric signing, refresh, and revocation controls |
+| Flyway + Hibernate validation | Reviewable, repeatable schema history without automatic production DDL | Every change requires an explicit forward migration |
+| Deterministic payment mock | Repeatable demos, retries, tests, and load runs | Does not model gateway timeouts, webhooks, fraud, PCI scope, or idempotency keys |
+
+## Project map
+
+```text
+src/main/java/com/ahdyahmed/eventhub/
+├── auth/          JWT registration, login, filter, principal
+├── booking/       reservation transaction, ownership, state machine, event listeners
+├── common/        error contract, validation, correlation/logging
+├── config/        cache, Kafka topology/retry, OpenAPI, security
+├── event/         searchable event catalog
+├── notification/  independent booking notification consumer
+├── payment/       deterministic payment consumer and result event
+├── seat/          seat inventory and optimistic version
+├── user/          user profile
+└── venue/         venue catalog
+
+src/main/resources/db/migration/   Flyway schema history
+scripts/smoke-test.ps1             end-to-end running-stack verification
+scripts/load-test.ps1              concurrent booking/cache load harness
+scripts/seed-demo.ps1              idempotent demo-data runner
+docs/architecture.drawio           editable four-page architecture
+.github/workflows/ci.yml           CI and GHCR publication
+```
+
+## Roadmap status
+
+- [x] Days 1–5 — foundation, domain, CRUD/search, validation, error contract, unit tests
+- [x] Days 6–10 — atomic booking, optimistic locking, Redis cache correctness and integration tests
+- [x] Days 11–15 — Kafka topology, booking/payment/notification events, retry/DLT, event-chain tests
+- [x] Days 16–18 — JWT ownership, structured correlated logs, full containerization and smoke test
+- [x] Days 19–21 — CI, GHCR delivery, concurrent real-stack load testing
+- [x] Day 22 — architecture diagrams and explicit design trade-offs
+- [x] Day 23 — OpenAPI/Swagger UI and idempotent demo catalog
+- [x] Day 24 — recruiter-focused documentation, release audit, and v1.0 preparation
+
+See [project-3-roadmap.md](project-3-roadmap.md) for the original day-by-day build plan and [CHANGELOG.md](CHANGELOG.md) for release notes.
+
+## Production boundary
+
+This is a complete, tested portfolio release—not a claim that a single-node local stack is ready for real ticket revenue. Before production: implement an outbox and idempotent external side effects, deploy replicated/secured infrastructure, move secrets to a managed store, add admin roles and token lifecycle controls, connect a real payment gateway, add DLT operations and alerting, and define backup/recovery objectives.
 
 ## License
 

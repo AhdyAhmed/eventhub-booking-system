@@ -38,6 +38,11 @@ spring:
     redis:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6380}
+      # Redis backs Spring Cache only; this project has no Redis repositories.
+      # Disabling repository auto-detection removes misleading startup messages
+      # about each JPA repository not being a Redis repository.
+      repositories:
+        enabled: false
 
   cache:
     type: redis
